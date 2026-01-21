@@ -1,0 +1,345 @@
+:root {
+  color-scheme: light;
+  font-family: "Space Grotesk", sans-serif;
+  --bg: #f7f2e9;
+  --ink: #1c1c1c;
+  --muted: #5d5a55;
+  --accent: #e06b3b;
+  --accent-2: #2f7f6f;
+  --panel: #fff8ee;
+  --panel-border: #e8dccb;
+  --mono: "IBM Plex Mono", monospace;
+  --sans: "Space Grotesk", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: radial-gradient(circle at top left, #ffe9d2 0%, #f7f2e9 45%, #f1ede6 100%);
+  color: var(--ink);
+  min-height: 100vh;
+}
+
+#app {
+  min-height: 100vh;
+}
+
+.app {
+  width: min(1120px, 100%);
+  margin: 0 auto;
+  padding: 48px 20px 80px;
+  display: grid;
+  gap: 24px;
+}
+
+.hero {
+  display: grid;
+  gap: 16px;
+  padding: 28px 32px;
+  background: linear-gradient(135deg, #fff2dd 0%, #fff7ec 50%, #f2f9f7 100%);
+  border-radius: 24px;
+  border: 1px solid var(--panel-border);
+  position: relative;
+  overflow: hidden;
+}
+
+.hero::after {
+  content: "";
+  position: absolute;
+  right: -80px;
+  top: -60px;
+  width: 220px;
+  height: 220px;
+  background: radial-gradient(circle, rgba(224, 107, 59, 0.25), transparent 70%);
+}
+
+.eyebrow {
+  font-family: var(--mono);
+  font-size: 12px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  margin: 0 0 8px;
+  color: var(--muted);
+}
+
+.hero h1 {
+  font-size: clamp(28px, 4vw, 40px);
+  margin: 0;
+}
+
+.subtitle {
+  margin: 0;
+  color: var(--muted);
+  max-width: 520px;
+}
+
+.grid {
+  display: grid;
+  gap: 20px;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+}
+
+.top-row {
+  display: grid;
+  gap: 20px;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+}
+
+.panel {
+  background: var(--panel);
+  border-radius: 20px;
+  border: 1px solid var(--panel-border);
+  padding: 20px;
+  box-shadow: 0 10px 30px rgba(44, 39, 33, 0.08);
+}
+
+.panel h2 {
+  margin: 0 0 12px;
+  font-size: 18px;
+}
+
+.status {
+  display: grid;
+  gap: 8px;
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--muted);
+}
+
+button {
+  font-family: var(--mono);
+  font-size: 13px;
+  padding: 10px 16px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  background: var(--accent);
+  color: white;
+  cursor: pointer;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+button.secondary {
+  background: transparent;
+  color: var(--ink);
+  border-color: var(--panel-border);
+}
+
+button.ghost {
+  background: transparent;
+  color: var(--muted);
+  border-color: transparent;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
+
+button:not(:disabled):hover {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 20px rgba(224, 107, 59, 0.25);
+}
+
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.transcripts {
+  display: grid;
+  gap: 12px;
+  max-height: 560px;
+  overflow: auto;
+  padding-right: 6px;
+}
+
+.transcript {
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid var(--panel-border);
+  background: white;
+}
+
+.transcript span {
+  display: block;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.transcripts.chat {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 12px 8px 16px;
+}
+
+.panel.conversation {
+  width: 100%;
+}
+
+.transcript.system {
+  text-align: center;
+  background: #fff;
+}
+
+.bubble {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  background: white;
+  border-radius: 18px;
+  padding: 16px 18px;
+  border: 1px solid var(--panel-border);
+  font-size: 16px;
+  line-height: 1.6;
+  max-width: 78%;
+  animation: rise 0.22s ease;
+}
+
+.bubble .avatar {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  flex: 0 0 40px;
+  position: relative;
+  display: grid;
+  place-items: center;
+  font-family: var(--mono);
+  font-size: 14px;
+  color: white;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.08);
+}
+
+.bubble .avatar::before {
+  content: "";
+  width: 22px;
+  height: 22px;
+  display: block;
+  background: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><circle cx='32' cy='22' r='12' fill='white'/><path d='M12 54c0-11 9-20 20-20s20 9 20 20v6H12z' fill='white'/></svg>") no-repeat center / contain;
+}
+
+.bubble .bubble-body span {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+
+.bubble .bubble-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.bubble .bubble-body p {
+  margin: 0;
+  font-size: 18px;
+}
+
+.bubble.ai_a {
+  align-self: flex-start;
+  border-left: 4px solid var(--accent);
+  background: #fff3e6;
+}
+
+.bubble.ai_a .avatar {
+  background-color: var(--accent);
+}
+
+.bubble.ai_a .avatar::before {
+  content: "";
+}
+
+.bubble.ai_b {
+  align-self: flex-end;
+  border-right: 4px solid var(--accent-2);
+  border-left: 1px solid var(--panel-border);
+  background: #ecfaf5;
+}
+
+.bubble.ai_b .avatar {
+  background-color: var(--accent-2);
+}
+
+.bubble.ai_b .avatar::before {
+  content: "";
+}
+
+.bubble.user {
+  align-self: flex-end;
+  border-right: 4px solid #3b6ee0;
+  border-left: 1px solid var(--panel-border);
+  background: #eef4ff;
+}
+
+.bubble.ai_b,
+.bubble.user {
+  flex-direction: row;
+}
+
+.bubble.ai_b .avatar,
+.bubble.user .avatar {
+  order: 2;
+}
+
+.bubble.ai_b .bubble-body,
+.bubble.user .bubble-body {
+  order: 1;
+}
+
+.bubble.user .avatar {
+  background-color: #3b6ee0;
+}
+
+.bubble.user .avatar::before {
+  content: "";
+}
+
+.bubble.ai_b .bubble-body span,
+.bubble.user .bubble-body span {
+  text-align: left;
+}
+
+.bubble.ai_b .bubble-body,
+.bubble.user .bubble-body {
+  text-align: left;
+  direction: ltr;
+}
+
+.bubble.streaming.ai_b,
+.bubble.streaming.user {
+  width: min(78%, 720px);
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.log {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--muted);
+  max-height: 160px;
+  overflow: auto;
+  white-space: pre-line;
+}
+
+@media (max-width: 640px) {
+  .hero {
+    padding: 20px;
+  }
+}

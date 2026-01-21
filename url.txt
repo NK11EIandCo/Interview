@@ -1,0 +1,6 @@
+PS C:\Users\koyo\Desktop\ElandCo\app\Interview> railway init
+> Select a workspace nk11eiandco's Projects
+> Project Name Interview
+
+Created project Interview on nk11eiandco's Projects
+https://railway.com/project/ea0ef35d-eed7-4da8-8c60-13d760a0b8e8
