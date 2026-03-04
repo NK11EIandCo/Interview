@@ -4,6 +4,10 @@ import { WebSocket, WebSocketServer } from "ws";
 import path from "path";
 import { fileURLToPath } from "url";
 import dotenv from "dotenv";
+import {
+  createPattern2InterviewerConfig,
+  createPattern2StudentConfig
+} from "./patterns/pattern2.js";
 
 dotenv.config();
 
@@ -16,6 +20,8 @@ const OPENAI_REALTIME_URL =
   "wss://api.openai.com/v1/realtime?model=gpt-realtime";
 const MIN_TURNS = 20;
 const MAX_TURNS = 40;
+// Sales-led flow toggle. Set to false to restore the previous AI-to-AI flow.
+const SALES_LED_FLOW = true;
 
 if (!OPENAI_API_KEY) {
   console.error("Error: OPENAI_API_KEY is not set.");
@@ -24,38 +30,10 @@ if (!OPENAI_API_KEY) {
 
 type AiKey = "ai_a" | "ai_b";
 
-const AI_PROFILES: Record<AiKey, { name: string; voice: string; instructions: string }> = {
-  ai_a: {
-    name: "Interviewer",
-    voice: "cedar",
-    instructions: `You are a hiring manager at a Japanese care facility.
-Ask short, practical questions about experience, motivation, and fit.
-Keep the pace brisk. Be direct but fair.
-Do not end the interview early. Only wrap up after you have covered all of these topics:
-- Past caregiving experience and specific duties
-- Motivation for caregiving work
-- Japanese language ability / communication
-- Shift availability (including night shift)
-- Physical stamina / health
-- Visa/residence status and possible start date
-When you decide to close, end politely with 【面接終了】.`
-  },
-  ai_b: {
-    name: "Candidate",
-    voice: "marin",
-    instructions: `You are a foreign candidate who is not fluent in Japanese.
-Speak in very short, simple fragments. Keep grammar broken and short.
-Japanese level is very low (around N5). Make it sound more limited in these ways:
-- Omit particles and verb endings often.
-- Use wrong word order and wrong verb conjugations.
-- Use very simple vocabulary; avoid keigo and formal phrases.
-- Mix in occasional English words like "sorry", "yes", "no", "thank you".
-- Echo a keyword from the question instead of answering fully.
-- If a question is complex, reply with "すみません、わからない" or ask to repeat.
-Keep each response to 1-2 short sentences, 5-8 words each.
-Tone is simple but polite and modest. Avoid being too casual or playful.
-Prefer simple polite endings like 「ありがとう」「お願いします」「失礼します」.`
-  }
+type AiProfile = { name: string; voice: string; instructions: string };
+const AI_PROFILES: Record<AiKey, AiProfile> = {
+  ai_a: createPattern2InterviewerConfig(),
+  ai_b: createPattern2StudentConfig()
 };
 
 interface RealtimeHandlers {
@@ -229,8 +207,19 @@ wss.on("connection", (clientSocket) => {
     ai_a: null,
     ai_b: null
   };
+  let lastSalesUtterance = "";
   let lastUserTranscript = "";
   let lastUserTranscriptAt = 0;
+  let pendingUserCommitAt = 0;
+  let waitingForUserTranscript = false;
+  let userTranscriptTimer: ReturnType<typeof setTimeout> | null = null;
+  let lastAiSpeaker: AiKey | null = null;
+  let waitingForHuman = false;
+  let manualAdvanceReady = false;
+  type IntroPhase = "sales_intro" | "student_intro" | "sales_supplement" | "company_overview" | "complete";
+  let introPhase: IntroPhase = "complete";
+  let companyOverviewPromptPending = false;
+  let pendingCandidateRetry = false;
   const endMarkers = ["【面接終了】", "【面接中止】"];
   type CoverageKey =
     | "experience"
@@ -276,6 +265,79 @@ wss.on("connection", (clientSocket) => {
     if (!coverage.visa && /ビザ|在留|滞在|資格|就労|期間|入社|開始日|いつから/.test(normalized)) {
       coverage.visa = true;
     }
+  };
+  const isStudentIntroSufficient = (text: string) => {
+    const normalized = text.replace(/\s+/g, "");
+    if (!normalized) return false;
+    if (/わからない|知りません|すみません|sorry/i.test(normalized)) return false;
+    if (/名前|わたし|私は|です|フィリピン|工場|介護|経験|年|歳|来日/.test(normalized)) {
+      return true;
+    }
+    return normalized.length >= 12;
+  };
+  const isCandidateNeedsClarification = (text: string) => {
+    const normalized = text.replace(/\s+/g, "");
+    if (!normalized) return true;
+    if (/わからない|知りません|難しい|むずかしい|もう一回|聞き取れ|すみません|sorry/i.test(normalized)) {
+      return true;
+    }
+    return normalized.length <= 6;
+  };
+  const isNoiseUserTranscript = (text: string) => {
+    const normalized = text.trim();
+    if (!normalized) return true;
+    const lower = normalized.toLowerCase();
+    const noiseTokens = [
+      "you",
+      "you.",
+      "bye",
+      "bye.",
+      "ok",
+      "ok.",
+      "okay",
+      "okay.",
+      "yes",
+      "no",
+      "hello",
+      "thanks",
+      "thankyou",
+      "um",
+      "uh",
+      "hmm",
+      "huh",
+      "...",
+      "..",
+      ".",
+      "-",
+      "_"
+    ];
+    if (noiseTokens.includes(lower)) return true;
+    const alphaCompact = lower.replace(/[^a-z0-9]/g, "");
+    if (/^[a-z]+$/.test(alphaCompact) && alphaCompact.length <= 4) return true;
+    const hasJapanese = /[ぁ-んァ-ン一-龯0-9]/.test(normalized);
+    const hasHangul = /[\uAC00-\uD7AF]/.test(normalized);
+    if (hasHangul && !hasJapanese) return true;
+    if (!hasJapanese && normalized.length <= 3) return true;
+    return false;
+  };
+  const nextAiForSalesFlow = (): AiKey => {
+    if (introPhase === "sales_intro") {
+      introPhase = "student_intro";
+      return "ai_b";
+    }
+    if (introPhase === "student_intro") {
+      return "ai_b";
+    }
+    if (introPhase === "sales_supplement") {
+      introPhase = "company_overview";
+      companyOverviewPromptPending = true;
+      return "ai_a";
+    }
+    if (introPhase === "company_overview") {
+      companyOverviewPromptPending = true;
+      return "ai_a";
+    }
+    return lastAiSpeaker === "ai_b" ? "ai_a" : "ai_b";
   };
   const hasAllCoverage = () => Object.values(coverage).every(Boolean);
   const listMissingCoverage = () =>
@@ -345,6 +407,91 @@ wss.on("connection", (clientSocket) => {
     }
   };
 
+  const clearUserTranscriptTimer = () => {
+    if (userTranscriptTimer) {
+      clearTimeout(userTranscriptTimer);
+      userTranscriptTimer = null;
+    }
+  };
+
+  const handleUserUtteranceReady = (transcript: string) => {
+    const normalized = transcript.trim();
+    if (!normalized || sessionEnded) return;
+
+    if (SALES_LED_FLOW) {
+      lastSalesUtterance = normalized;
+      const studentSocket = aiSockets.ai_b;
+      if (studentSocket && studentSocket.readyState === WebSocket.OPEN) {
+        studentSocket.send(
+          JSON.stringify({
+            type: "conversation.item.create",
+            item: {
+              type: "message",
+              role: "user",
+              content: [
+                {
+                  type: "input_text",
+                  text: `[営業が言いました]: ${lastSalesUtterance}`
+                }
+              ]
+            }
+          })
+        );
+      }
+    }
+
+    if (autoMode) {
+      if (SALES_LED_FLOW) {
+        if (!waitingForHuman && lastAiSpeaker !== null) {
+          return;
+        }
+        const nextAi = pendingCandidateRetry ? "ai_b" : nextAiForSalesFlow();
+        pendingCandidateRetry = false;
+        waitingForHuman = false;
+        queuedNextKeys = [nextAi];
+        const first = queuedNextKeys.shift() ?? nextAi;
+        requestAiResponse(first, 350);
+      } else {
+        let nextKeys: AiKey[] = ["ai_a"];
+        if (lastUserTranscript && Date.now() - lastUserTranscriptAt < 5000) {
+          const decision = pickNextSpeaker(lastUserTranscript);
+          if (decision === "ai_a") {
+            nextKeys = ["ai_a"];
+          } else if (decision === "ai_b") {
+            nextKeys = ["ai_b"];
+          } else if (decision === "both") {
+            nextKeys = ["ai_a", "ai_b"];
+          }
+        }
+        queuedNextKeys = [...nextKeys];
+        const first = queuedNextKeys.shift() ?? "ai_a";
+        requestAiResponse(first, 350);
+      }
+    } else {
+      if (SALES_LED_FLOW) {
+        const nextAi = pendingCandidateRetry ? "ai_b" : nextAiForSalesFlow();
+        pendingCandidateRetry = false;
+        waitingForHuman = false;
+        queuedNextKeys = [nextAi];
+        manualAdvanceReady = true;
+      } else {
+        let nextKeys: AiKey[] = ["ai_a"];
+        if (lastUserTranscript && Date.now() - lastUserTranscriptAt < 5000) {
+          const decision = pickNextSpeaker(lastUserTranscript);
+          if (decision === "ai_a") {
+            nextKeys = ["ai_a"];
+          } else if (decision === "ai_b") {
+            nextKeys = ["ai_b"];
+          } else if (decision === "both") {
+            nextKeys = ["ai_a", "ai_b"];
+          }
+        }
+        queuedNextKeys = [...nextKeys];
+        manualAdvanceReady = true;
+      }
+    }
+  };
+
   const createAiSocket = (key: AiKey) => {
     const profile = AI_PROFILES[key];
     return createRealtimeConnection(profile, {
@@ -354,7 +501,12 @@ wss.on("connection", (clientSocket) => {
           pendingStart = false;
           sendToClient({ type: "sessions_ready" });
           if (autoMode) {
-            requestAiResponse("ai_a");
+            if (SALES_LED_FLOW) {
+              waitingForHuman = true;
+              lastAiSpeaker = null;
+            } else {
+              requestAiResponse("ai_a");
+            }
           }
         }
       },
@@ -424,6 +576,19 @@ wss.on("connection", (clientSocket) => {
         transcriptDone[key] = true;
         logEvent(key, "transcript_done", `len=${finalText.length}`);
         totalTurns += 1;
+        if (SALES_LED_FLOW) {
+          if (key === "ai_b" && introPhase === "student_intro") {
+            if (isStudentIntroSufficient(finalText)) {
+              introPhase = "sales_supplement";
+            }
+          }
+          if (key === "ai_b" && introPhase === "complete") {
+            pendingCandidateRetry = isCandidateNeedsClarification(finalText);
+          }
+          if (key === "ai_a" && introPhase === "company_overview") {
+            introPhase = "complete";
+          }
+        }
         if (key === "ai_a") {
           updateCoverage(finalText);
         }
@@ -477,21 +642,24 @@ wss.on("connection", (clientSocket) => {
           const otherSocket = aiSockets[otherKey];
           if (otherSocket && otherSocket.readyState === WebSocket.OPEN) {
             const label = key === "ai_a" ? "Interviewer" : "Candidate";
-            otherSocket.send(
-              JSON.stringify({
-                type: "conversation.item.create",
-                item: {
-                  type: "message",
-                  role: "user",
-                  content: [
-                    {
-                      type: "input_text",
-                      text: `[${label} said]: ${finalText}`
-                    }
-                  ]
-                }
-              })
-            );
+            const shouldForward = !SALES_LED_FLOW || key !== "ai_a";
+            if (shouldForward) {
+              otherSocket.send(
+                JSON.stringify({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "message",
+                    role: "user",
+                    content: [
+                      {
+                        type: "input_text",
+                        text: `[${label} said]: ${finalText}`
+                      }
+                    ]
+                  }
+                })
+              );
+            }
           }
         }
       },
@@ -499,6 +667,15 @@ wss.on("connection", (clientSocket) => {
         if (key !== "ai_a") return;
         const normalized = transcript.trim();
         if (!normalized) return;
+        if (isNoiseUserTranscript(normalized)) {
+          if (waitingForUserTranscript) {
+            waitingForUserTranscript = false;
+            pendingUserCommitAt = 0;
+            clearUserTranscriptTimer();
+            sendToClient({ type: "user_no_speech" });
+          }
+          return;
+        }
         const now = Date.now();
         if (normalized === lastUserTranscript && now - lastUserTranscriptAt < 2000) {
           return;
@@ -506,6 +683,12 @@ wss.on("connection", (clientSocket) => {
         lastUserTranscript = normalized;
         lastUserTranscriptAt = now;
         sendToClient({ type: "user_transcript", text: normalized });
+        if (waitingForUserTranscript && lastUserTranscriptAt >= pendingUserCommitAt) {
+          waitingForUserTranscript = false;
+          pendingUserCommitAt = 0;
+          clearUserTranscriptTimer();
+          handleUserUtteranceReady(normalized);
+        }
       },
       onInputTranscript: () => {},
       onError: (error) => {
@@ -529,6 +712,25 @@ wss.on("connection", (clientSocket) => {
     transcriptBuffers[key] = "";
     setTimeout(() => {
       if (socket.readyState !== WebSocket.OPEN) return;
+      if (key === "ai_a" && companyOverviewPromptPending) {
+        companyOverviewPromptPending = false;
+        socket.send(
+          JSON.stringify({
+            type: "conversation.item.create",
+            item: {
+              type: "message",
+              role: "user",
+              content: [
+                {
+                  type: "input_text",
+                  text:
+                    "Before asking questions, briefly explain the job responsibilities and workplace atmosphere for this role. Keep it concise."
+                }
+              ]
+            }
+          })
+        );
+      }
       socket.send(
         JSON.stringify({
           type: "response.create",
@@ -542,6 +744,12 @@ wss.on("connection", (clientSocket) => {
     if (!audioDone[key] || !transcriptDone[key] || !playbackDone[key]) return;
     if (!autoMode || userSpeaking) return;
     if (sessionEnded) return;
+
+    if (SALES_LED_FLOW) {
+      lastAiSpeaker = key;
+      waitingForHuman = true;
+      return;
+    }
 
     const nextKey =
       queuedNextKeys.shift() ?? (key === "ai_a" ? "ai_b" : "ai_a");
@@ -559,6 +767,7 @@ wss.on("connection", (clientSocket) => {
       target?: AiKey;
       data?: string;
       turnId?: number;
+      mode?: "auto" | "step";
     };
     try {
       message = JSON.parse(raw.toString());
@@ -567,11 +776,15 @@ wss.on("connection", (clientSocket) => {
     }
 
     if (message.type === "start") {
-      autoMode = true;
+      autoMode = message.mode !== "step";
       sessionEnded = false;
       sessionEndReason = null;
       totalTurns = 0;
       queuedNextKeys = [];
+      waitingForHuman = SALES_LED_FLOW;
+      lastAiSpeaker = null;
+      manualAdvanceReady = false;
+      introPhase = SALES_LED_FLOW ? "sales_intro" : "complete";
       coverage = {
         experience: false,
         motivation: false,
@@ -582,7 +795,14 @@ wss.on("connection", (clientSocket) => {
       };
       if (sessionReady.ai_a && sessionReady.ai_b) {
         sendToClient({ type: "sessions_ready" });
-        requestAiResponse("ai_a");
+        if (!SALES_LED_FLOW) {
+          if (autoMode) {
+            requestAiResponse("ai_a");
+          } else {
+            queuedNextKeys = ["ai_a"];
+            manualAdvanceReady = true;
+          }
+        }
       } else {
         pendingStart = true;
         sendToClient({ type: "waiting_for_sessions" });
@@ -615,6 +835,19 @@ wss.on("connection", (clientSocket) => {
           socket.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
         }
       });
+      lastSalesUtterance = "";
+      queuedNextKeys = [];
+      manualAdvanceReady = false;
+      waitingForUserTranscript = true;
+      pendingUserCommitAt = Date.now();
+      clearUserTranscriptTimer();
+      userTranscriptTimer = setTimeout(() => {
+        if (!waitingForUserTranscript) return;
+        waitingForUserTranscript = false;
+        pendingUserCommitAt = 0;
+        lastSalesUtterance = "";
+        sendToClient({ type: "user_no_speech" });
+      }, 3000);
       return;
     }
 
@@ -625,22 +858,15 @@ wss.on("connection", (clientSocket) => {
 
     if (message.type === "user_done") {
       userSpeaking = false;
-      if (autoMode && !sessionEnded) {
-        let nextKeys: AiKey[] = ["ai_a"];
-        if (lastUserTranscript && Date.now() - lastUserTranscriptAt < 5000) {
-          const decision = pickNextSpeaker(lastUserTranscript);
-          if (decision === "ai_a") {
-            nextKeys = ["ai_a"];
-          } else if (decision === "ai_b") {
-            nextKeys = ["ai_b"];
-          } else if (decision === "both") {
-            nextKeys = ["ai_a", "ai_b"];
-          }
-        }
-        queuedNextKeys = [...nextKeys];
-        const first = queuedNextKeys.shift() ?? "ai_a";
-        requestAiResponse(first, 350);
-      }
+      return;
+    }
+
+    if (message.type === "advance") {
+      if (autoMode || sessionEnded || !manualAdvanceReady) return;
+      const nextKey = queuedNextKeys.shift();
+      if (!nextKey) return;
+      manualAdvanceReady = false;
+      requestAiResponse(nextKey, 350);
       return;
     }
 

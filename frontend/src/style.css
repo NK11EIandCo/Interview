@@ -151,6 +151,25 @@ button:not(:disabled):hover {
   gap: 10px;
 }
 
+.mode-toggle {
+  display: flex;
+  gap: 8px;
+  padding: 4px;
+  border-radius: 999px;
+  border: 1px solid var(--panel-border);
+  background: rgba(255, 255, 255, 0.7);
+}
+
+.mode-toggle button {
+  padding: 8px 14px;
+}
+
+.mode-toggle button.active {
+  background: var(--ink);
+  color: white;
+  border-color: transparent;
+}
+
 .transcripts {
   display: grid;
   gap: 12px;

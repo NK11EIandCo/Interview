@@ -109,6 +109,10 @@ export const App = () => {
   const [logs, setLogs] = useState<string[]>([]);
   const [transcripts, setTranscripts] = useState<TranscriptItem[]>([]);
   const [recording, setRecording] = useState(false);
+  const [flowMode, setFlowMode] = useState<"auto" | "step">("auto");
+  const [manualAdvanceReady, setManualAdvanceReady] = useState(false);
+  const [awaitingUserTranscript, setAwaitingUserTranscript] = useState(false);
+  const [noSpeechNotice, setNoSpeechNotice] = useState<string | null>(null);
   const [configStatus, setConfigStatus] = useState({
     firebase: false,
     supabase: false
@@ -133,7 +137,7 @@ export const App = () => {
   const audioDoneRef = useRef<Record<string, boolean>>({});
   const activeTurnRef = useRef<Record<string, number>>({});
   const finalizedTurnRef = useRef<Record<string, boolean>>({});
-  const pendingUserTranscriptIdsRef = useRef<string[]>([]);
+  const awaitingUserTimerRef = useRef<number | null>(null);
   const hasConnectedRef = useRef(false);
 
   const getTurnKey = (source: string, turnId: number) => `${source}:${turnId}`;
@@ -144,6 +148,9 @@ export const App = () => {
 
   const resetConversationState = () => {
     setTranscripts([]);
+    setManualAdvanceReady(false);
+    setAwaitingUserTranscript(false);
+    setNoSpeechNotice(null);
     activeTranscriptRef.current = {};
     pendingTranscriptQueueRef.current = {};
     pendingFinalRef.current = {};
@@ -152,7 +159,10 @@ export const App = () => {
     playbackEndTimeRef.current = {};
     activeTurnRef.current = {};
     finalizedTurnRef.current = {};
-    pendingUserTranscriptIdsRef.current = [];
+    if (awaitingUserTimerRef.current) {
+      window.clearTimeout(awaitingUserTimerRef.current);
+      awaitingUserTimerRef.current = null;
+    }
     Object.values(playbackDoneTimerRef.current).forEach((timerId) => {
       if (timerId) {
         window.clearTimeout(timerId);
@@ -170,6 +180,7 @@ export const App = () => {
   const startRecording = async () => {
     if (recordingRef.current) return;
     try {
+      setNoSpeechNotice(null);
       sendMessage({ type: "user_speaking" });
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
@@ -213,17 +224,27 @@ export const App = () => {
     setRecording(false);
     sendMessage({ type: "user_audio_commit" });
     sendMessage({ type: "user_done" });
+    if (flowMode === "step") {
+      setManualAdvanceReady(true);
+    }
 
-    const placeholderId = `${Date.now()}-user-${transcriptCounterRef.current++}`;
-    pendingUserTranscriptIdsRef.current.push(placeholderId);
-    const placeholderItem: TranscriptItem = {
-      id: placeholderId,
-      source: "user",
-      name: "You",
-      text: "Transcribing...",
-      status: "streaming"
-    };
-    setTranscripts((prev) => [...prev, placeholderItem]);
+    setAwaitingUserTranscript(true);
+    if (awaitingUserTimerRef.current) {
+      window.clearTimeout(awaitingUserTimerRef.current);
+    }
+    awaitingUserTimerRef.current = window.setTimeout(() => {
+      setAwaitingUserTranscript(false);
+      setNoSpeechNotice("音声が認識されていません。");
+      const nextItem: TranscriptItem = {
+        id: `${Date.now()}-user-${transcriptCounterRef.current++}`,
+        source: "user",
+        name: "You",
+        text: "音声が認識されていません。",
+        status: "final"
+      };
+      setTranscripts((prev) => [...prev, nextItem]);
+      appendLog("No speech detected (client timeout).");
+    }, 4500);
 
     processorRef.current?.disconnect();
     processorRef.current = null;
@@ -235,6 +256,11 @@ export const App = () => {
     mediaStreamRef.current = null;
 
     appendLog("Mic streaming off (audio committed).");
+  };
+
+  const requestAdvance = () => {
+    sendMessage({ type: "advance" });
+    setManualAdvanceReady(false);
   };
 
   const playAudioChunk = (
@@ -385,11 +411,13 @@ export const App = () => {
     ws.addEventListener("close", () => {
       setWsStatus(WS_STATUS.closed);
       appendLog("WebSocket closed.");
+      setManualAdvanceReady(false);
     });
 
     ws.addEventListener("error", () => {
       setWsStatus(WS_STATUS.error);
       appendLog("WebSocket error.");
+      setManualAdvanceReady(false);
     });
 
     ws.addEventListener("message", (event) => {
@@ -517,27 +545,46 @@ export const App = () => {
         }
       }
 
+      if (payload.type === "user_no_speech") {
+        if (awaitingUserTimerRef.current) {
+          window.clearTimeout(awaitingUserTimerRef.current);
+          awaitingUserTimerRef.current = null;
+        }
+        if (!awaitingUserTranscript) {
+          setNoSpeechNotice("音声が認識されていません。");
+          appendLog("No speech detected.");
+          return;
+        }
+        setAwaitingUserTranscript(false);
+        setNoSpeechNotice("音声が認識されていません。");
+        const nextItem: TranscriptItem = {
+          id: `${Date.now()}-user-${transcriptCounterRef.current++}`,
+          source: "user",
+          name: "You",
+          text: "音声が認識されていません。",
+          status: "final"
+        };
+        setTranscripts((prev) => [...prev, nextItem]);
+        setManualAdvanceReady(false);
+        appendLog("No speech detected.");
+      }
+
       if (payload.type === "user_transcript") {
         const transcriptText = String(payload.text ?? "");
-        const pendingId = pendingUserTranscriptIdsRef.current.shift();
-        if (pendingId) {
-          setTranscripts((prev) =>
-            prev.map<TranscriptItem>((item) =>
-              item.id === pendingId
-                ? { ...item, text: transcriptText, status: "final" }
-                : item
-            )
-          );
-        } else {
-          const nextItem: TranscriptItem = {
-            id: `${Date.now()}-user-${transcriptCounterRef.current++}`,
-            source: "user",
-            name: "You",
-            text: transcriptText,
-            status: "final"
-          };
-          setTranscripts((prev) => [...prev, nextItem]);
+        if (awaitingUserTimerRef.current) {
+          window.clearTimeout(awaitingUserTimerRef.current);
+          awaitingUserTimerRef.current = null;
         }
+        setAwaitingUserTranscript(false);
+        setNoSpeechNotice(null);
+        const nextItem: TranscriptItem = {
+          id: `${Date.now()}-user-${transcriptCounterRef.current++}`,
+          source: "user",
+          name: "You",
+          text: transcriptText,
+          status: "final"
+        };
+        setTranscripts((prev) => [...prev, nextItem]);
       }
 
       if (payload.type === "error") {
@@ -549,6 +596,10 @@ export const App = () => {
       ws.close();
     };
   }, []);
+
+  useEffect(() => {
+    setManualAdvanceReady(false);
+  }, [flowMode]);
 
 
   useEffect(() => {
@@ -571,12 +622,29 @@ export const App = () => {
           <button
             onClick={() => {
               setSessionEnded(false);
-              sendMessage({ type: "start" });
+              setManualAdvanceReady(false);
+              sendMessage({ type: "start", mode: flowMode });
             }}
             disabled={wsStatus !== WS_STATUS.open}
           >
             Start Session
           </button>
+          <div className="mode-toggle" role="group" aria-label="Mode">
+            <button
+              className={flowMode === "auto" ? "secondary active" : "ghost"}
+              onClick={() => setFlowMode("auto")}
+              type="button"
+            >
+              Auto
+            </button>
+            <button
+              className={flowMode === "step" ? "secondary active" : "ghost"}
+              onClick={() => setFlowMode("step")}
+              type="button"
+            >
+              Step
+            </button>
+          </div>
         </div>
       </section>
 
@@ -588,6 +656,7 @@ export const App = () => {
             <div>OpenAI sessions: {sessionsReady ? "ready" : "not ready"}</div>
             <div>Session: {sessionEnded ? "ended" : "active"}</div>
             <div>Mic: {recording ? "streaming" : "idle"}</div>
+            <div>Mode: {flowMode}</div>
             <div>Firebase: {configStatus.firebase ? "ready" : "missing"}</div>
             <div>Supabase: {configStatus.supabase ? "ready" : "missing"}</div>
           </div>
@@ -605,6 +674,15 @@ export const App = () => {
             >
               Stop + Commit
             </button>
+            {flowMode === "step" && (
+              <button
+                className="secondary"
+                onClick={requestAdvance}
+                disabled={!manualAdvanceReady || !sessionsReady}
+              >
+                Next Turn
+              </button>
+            )}
           </div>
         </div>
 
@@ -623,6 +701,12 @@ export const App = () => {
             <div className="transcript system">
               <span>system</span>
               No transcripts yet.
+            </div>
+          )}
+          {noSpeechNotice && (
+            <div className="transcript system">
+              <span>system</span>
+              {noSpeechNotice}
             </div>
           )}
           {transcripts.map((item) => (
