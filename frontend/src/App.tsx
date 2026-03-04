@@ -113,6 +113,7 @@ export const App = () => {
   const [manualAdvanceReady, setManualAdvanceReady] = useState(false);
   const [awaitingUserTranscript, setAwaitingUserTranscript] = useState(false);
   const [noSpeechNotice, setNoSpeechNotice] = useState<string | null>(null);
+  const [activeAiStreamingCount, setActiveAiStreamingCount] = useState(0);
   const [configStatus, setConfigStatus] = useState({
     firebase: false,
     supabase: false
@@ -138,6 +139,7 @@ export const App = () => {
   const activeTurnRef = useRef<Record<string, number>>({});
   const finalizedTurnRef = useRef<Record<string, boolean>>({});
   const awaitingUserTimerRef = useRef<number | null>(null);
+  const activeAiTurnKeysRef = useRef<Set<string>>(new Set());
   const hasConnectedRef = useRef(false);
 
   const getTurnKey = (source: string, turnId: number) => `${source}:${turnId}`;
@@ -151,6 +153,8 @@ export const App = () => {
     setManualAdvanceReady(false);
     setAwaitingUserTranscript(false);
     setNoSpeechNotice(null);
+    setActiveAiStreamingCount(0);
+    activeAiTurnKeysRef.current.clear();
     activeTranscriptRef.current = {};
     pendingTranscriptQueueRef.current = {};
     pendingFinalRef.current = {};
@@ -169,6 +173,19 @@ export const App = () => {
       }
     });
     playbackDoneTimerRef.current = {};
+  };
+
+  const markAiStreamingStart = (turnKey: string) => {
+    if (!activeAiTurnKeysRef.current.has(turnKey)) {
+      activeAiTurnKeysRef.current.add(turnKey);
+      setActiveAiStreamingCount(activeAiTurnKeysRef.current.size);
+    }
+  };
+
+  const markAiStreamingDone = (turnKey: string) => {
+    if (activeAiTurnKeysRef.current.delete(turnKey)) {
+      setActiveAiStreamingCount(activeAiTurnKeysRef.current.size);
+    }
   };
 
   const sendMessage = (payload: object) => {
@@ -357,6 +374,7 @@ export const App = () => {
               : item
           );
           delete activeTranscriptRef.current[turnKey];
+          markAiStreamingDone(turnKey);
           finalizedTurnRef.current[turnKey] = true;
           return updated;
         }
@@ -368,6 +386,7 @@ export const App = () => {
           text,
           status: "final"
         };
+        markAiStreamingDone(turnKey);
         return [...prev, finalItem];
       });
 
@@ -463,6 +482,7 @@ export const App = () => {
             : activeTurnRef.current[sourceKey] ?? turnId;
         activeTurnRef.current[sourceKey] = resolvedTurnId;
         const turnKey = getTurnKey(sourceKey, resolvedTurnId);
+        markAiStreamingStart(turnKey);
         const currentId = activeTranscriptRef.current[turnKey];
         if (!currentId) {
           const nextId = `${Date.now()}-${turnKey}-${transcriptCounterRef.current++}`;
@@ -678,7 +698,13 @@ export const App = () => {
               <button
                 className="secondary"
                 onClick={requestAdvance}
-                disabled={!manualAdvanceReady || !sessionsReady}
+                disabled={
+                  !manualAdvanceReady ||
+                  !sessionsReady ||
+                  recording ||
+                  awaitingUserTranscript ||
+                  activeAiStreamingCount > 0
+                }
               >
                 Next Turn
               </button>
