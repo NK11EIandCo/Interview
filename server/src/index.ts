@@ -216,11 +216,17 @@ wss.on("connection", (clientSocket) => {
   let lastAiSpeaker: AiKey | null = null;
   let waitingForHuman = false;
   let manualAdvanceReady = false;
+  type Phase = "pattern1" | "pattern2" | "pattern3";
+  let phase: Phase = "pattern1";
+  type ScenarioMode = "unified" | "pattern1" | "pattern2" | "pattern3";
+  let scenarioMode: ScenarioMode = "unified";
   type IntroPhase = "sales_intro" | "student_intro" | "sales_supplement" | "company_overview" | "complete";
   let introPhase: IntroPhase = "complete";
   let companyOverviewPromptPending = false;
   let pendingCandidateRetry = false;
+  let studentIntroPromptPending = false;
   const endMarkers = ["【面接終了】", "【面接中止】"];
+  let lastPhaseNotified: Phase | null = null;
   type CoverageKey =
     | "experience"
     | "motivation"
@@ -278,10 +284,11 @@ wss.on("connection", (clientSocket) => {
   const isCandidateNeedsClarification = (text: string) => {
     const normalized = text.replace(/\s+/g, "");
     if (!normalized) return true;
-    if (/わからない|知りません|難しい|むずかしい|もう一回|聞き取れ|すみません|sorry/i.test(normalized)) {
+    // Only treat explicit confusion/requests as needing a retry.
+    if (/わからない|知りません|難しい|むずかしい|もう一回|もういちど|聞き取れ|聞こえない|理解できない|意味わからない|sorry/i.test(normalized)) {
       return true;
     }
-    return normalized.length <= 6;
+    return false;
   };
   const isNoiseUserTranscript = (text: string) => {
     const normalized = text.trim();
@@ -320,7 +327,38 @@ wss.on("connection", (clientSocket) => {
     if (!hasJapanese && normalized.length <= 3) return true;
     return false;
   };
+  const shouldTransitionToPattern2 = (text: string) => {
+    const normalized = text.replace(/\s+/g, "");
+    if (!normalized) return false;
+    const hasInterviewer = /面接官|採用担当|企業|担当者/.test(normalized);
+    const hasStart = /入室|参加|開始|始め|スタート|面接開始/.test(normalized);
+    const hasDismiss = /退室|退出/.test(normalized);
+    return hasInterviewer && hasStart && !hasDismiss;
+  };
+  const shouldTransitionToPattern3 = (text: string) => {
+    const normalized = text.replace(/\s+/g, "");
+    if (!normalized) return false;
+    const hasStudent = /学生|生徒|候補者/.test(normalized);
+    const hasExit = /退室|退出|退席/.test(normalized);
+    return hasStudent && hasExit;
+  };
+  const shouldPromptCompanyResponse = (text: string) => {
+    const normalized = text.replace(/\s+/g, "");
+    if (!normalized) return false;
+    return /印象|感想|いかが|評価|結果|内定|通知書|労働条件|雛形|ビザ|書類|日程/.test(normalized);
+  };
+  const shouldPromptStudentIntro = (text: string) => {
+    const normalized = text.replace(/\s+/g, "");
+    if (!normalized) return false;
+    return /自己紹介|お名前|名前|紹介/.test(normalized);
+  };
   const nextAiForSalesFlow = (): AiKey => {
+    if (phase === "pattern1") {
+      return "ai_b";
+    }
+    if (phase === "pattern3") {
+      return "ai_a";
+    }
     if (introPhase === "sales_intro") {
       introPhase = "student_intro";
       return "ai_b";
@@ -407,6 +445,117 @@ wss.on("connection", (clientSocket) => {
     }
   };
 
+  const emitPhaseUpdate = (nextPhase: Phase, reason: "start" | "trigger" | "manual") => {
+    sendToClient({ type: "phase_update", phase: nextPhase, reason });
+  };
+
+  const setPhase = (nextPhase: Phase, reason: "start" | "trigger" | "manual") => {
+    if (scenarioMode !== "unified" && reason !== "start") return;
+    if (phase === nextPhase) return;
+    phase = nextPhase;
+    if (phase === "pattern2") {
+      introPhase = "student_intro";
+      pendingCandidateRetry = false;
+      companyOverviewPromptPending = false;
+      studentIntroPromptPending = false;
+    }
+    if (phase === "pattern3") {
+      introPhase = "complete";
+      pendingCandidateRetry = false;
+      companyOverviewPromptPending = false;
+      studentIntroPromptPending = false;
+    }
+    emitPhaseUpdate(phase, reason);
+    sendPhaseContextToCandidate(phase);
+    sendPhaseContextToInterviewer(phase);
+  };
+
+  const sendPhaseContextToCandidate = (nextPhase: Phase) => {
+    if (lastPhaseNotified === nextPhase) return;
+    const studentSocket = aiSockets.ai_b;
+    if (!studentSocket || studentSocket.readyState !== WebSocket.OPEN) return;
+    const text =
+      nextPhase === "pattern1"
+        ? `Phase: pattern1 (sales vs student training).
+Follow the drills when prompted by the sales representative:
+- Attendance: when your name is called, respond "はい" (briefly).
+- Reaction practice: show simple reactions like "うんうん" or "はい".
+- Q&A: if asked "日本でどれくらい働きたい？" answer "日本でずっと働きたいです".
+- Q&A: if asked "お仕事大変でも大丈夫？頑張れますか？" answer "大丈夫です。頑張ります".
+- If asked for questions to the company, avoid money/relocation/visa. Ask one good question such as:
+  "外国人の先輩はいますか？" / "将来リーダーになれますか？" / "入社前に勉強することはありますか？" / "仕事の時に大切なことはありますか？"
+- Keep responses short and simple, as usual.`
+        : nextPhase === "pattern2"
+          ? `Phase: pattern2 (sales-led interview with interviewer present).
+Wait for the sales representative to paraphrase before answering.
+When prompted by the sales representative:
+- For self-introduction, give your name and one short background detail.
+- If asked "日本でどれくらい働きたい？" answer "日本でずっと働きたいです".
+- If asked "お仕事大変でも大丈夫？頑張れますか？" answer "大丈夫です。頑張ります".
+- If asked for questions to the company, avoid money/relocation/visa. Ask one good question like:
+  "外国人の先輩はいますか？" / "将来リーダーになれますか？" / "入社前に勉強することはありますか？" / "仕事の時に大切なことはありますか？".
+Keep responses short and simple.`
+          : `Phase: pattern3 (post-interview discussion with the company).
+You have left the interview. Do not respond anymore.`;
+    studentSocket.send(
+      JSON.stringify({
+        type: "conversation.item.create",
+        item: {
+          type: "message",
+          role: "user",
+          content: [
+            {
+              type: "input_text",
+              text
+            }
+          ]
+        }
+      })
+    );
+    lastPhaseNotified = nextPhase;
+  };
+
+  const sendPhaseContextToInterviewer = (nextPhase: Phase) => {
+    const interviewerSocket = aiSockets.ai_a;
+    if (!interviewerSocket || interviewerSocket.readyState !== WebSocket.OPEN) return;
+    const text =
+      nextPhase === "pattern1"
+        ? `Phase: pattern1 (sales vs student training).
+Do not speak. Wait until pattern2 or pattern3.`
+        : nextPhase === "pattern2"
+          ? `Phase: pattern2 (sales-led interview with interviewer present).
+Wait for the sales representative to prompt you before each question.
+If asked to introduce the job or company atmosphere, respond briefly first, then proceed with questions.
+Do not ask candidates directly; let the sales representative relay in simpler words.
+Avoid visa-related questions while students are present.`
+          : `Phase: pattern3 (post-interview closing with the company only).
+Students have left. Respond as the hiring company representative.
+Follow this flow when the sales rep prompts you:
+- Impressions: share overall impressions without saying "難しい" or "良い悪い".
+- If you have not decided yet, say you will review internally and can reply within 2-3 days.
+- If asked about an offer/conditions document (労働条件通知書), agree and choose a cooperative path:
+  either request their template (雛形) or say you will send your company format.
+- When sales explains the 技人国ビザ and career-up expectations, acknowledge and confirm understanding.
+- If asked about required documents or next steps, acknowledge and be cooperative.
+When the sales rep says the closing is done (e.g., "以上で終了です" / "本日はありがとうございました"), end with "【面接終了】".
+Keep responses concise and businesslike.`;
+    interviewerSocket.send(
+      JSON.stringify({
+        type: "conversation.item.create",
+        item: {
+          type: "message",
+          role: "user",
+          content: [
+            {
+              type: "input_text",
+              text
+            }
+          ]
+        }
+      })
+    );
+  };
+
   const clearUserTranscriptTimer = () => {
     if (userTranscriptTimer) {
       clearTimeout(userTranscriptTimer);
@@ -418,7 +567,53 @@ wss.on("connection", (clientSocket) => {
     const normalized = transcript.trim();
     if (!normalized || sessionEnded) return;
 
-    if (SALES_LED_FLOW) {
+    let forceNextAi: AiKey | null = null;
+    let skipCandidateForward = false;
+    let suppressAutoAdvance = false;
+    if (
+      SALES_LED_FLOW &&
+      scenarioMode === "unified" &&
+      phase === "pattern1" &&
+      shouldTransitionToPattern2(normalized)
+    ) {
+      setPhase("pattern2", "trigger");
+      introPhase = "student_intro";
+      skipCandidateForward = true;
+      suppressAutoAdvance = true;
+    }
+    if (
+      SALES_LED_FLOW &&
+      scenarioMode === "unified" &&
+      phase === "pattern2" &&
+      shouldTransitionToPattern3(normalized)
+    ) {
+      setPhase("pattern3", "trigger");
+      skipCandidateForward = true;
+      suppressAutoAdvance = true;
+      if (shouldPromptCompanyResponse(normalized)) {
+        suppressAutoAdvance = false;
+        forceNextAi = "ai_a";
+      }
+    }
+    if (
+      SALES_LED_FLOW &&
+      phase === "pattern2" &&
+      introPhase === "student_intro" &&
+      shouldPromptStudentIntro(normalized)
+    ) {
+      studentIntroPromptPending = true;
+      forceNextAi = "ai_b";
+      skipCandidateForward = true;
+    }
+    if (
+      suppressAutoAdvance &&
+      studentIntroPromptPending &&
+      forceNextAi === "ai_b"
+    ) {
+      suppressAutoAdvance = false;
+    }
+
+    if (SALES_LED_FLOW && !skipCandidateForward && phase !== "pattern3") {
       lastSalesUtterance = normalized;
       const studentSocket = aiSockets.ai_b;
       if (studentSocket && studentSocket.readyState === WebSocket.OPEN) {
@@ -438,9 +633,41 @@ wss.on("connection", (clientSocket) => {
           })
         );
       }
+      if (phase === "pattern2") {
+        const interviewerSocket = aiSockets.ai_a;
+        if (interviewerSocket && interviewerSocket.readyState === WebSocket.OPEN) {
+          interviewerSocket.send(
+            JSON.stringify({
+              type: "conversation.item.create",
+              item: {
+                type: "message",
+                role: "user",
+                content: [
+                  {
+                    type: "input_text",
+                    text: `[営業が面接官に伝えました]: ${lastSalesUtterance}`
+                  }
+                ]
+              }
+            })
+          );
+        }
+      }
     }
 
     if (autoMode) {
+      if (suppressAutoAdvance) {
+        waitingForHuman = true;
+        return;
+      }
+      if (forceNextAi) {
+        pendingCandidateRetry = false;
+        waitingForHuman = false;
+        queuedNextKeys = [forceNextAi];
+        const first = queuedNextKeys.shift() ?? forceNextAi;
+        requestAiResponse(first, 350);
+        return;
+      }
       if (SALES_LED_FLOW) {
         if (!waitingForHuman && lastAiSpeaker !== null) {
           return;
@@ -468,6 +695,18 @@ wss.on("connection", (clientSocket) => {
         requestAiResponse(first, 350);
       }
     } else {
+      if (suppressAutoAdvance) {
+        waitingForHuman = true;
+        manualAdvanceReady = false;
+        return;
+      }
+      if (forceNextAi) {
+        pendingCandidateRetry = false;
+        waitingForHuman = false;
+        queuedNextKeys = [forceNextAi];
+        manualAdvanceReady = true;
+        return;
+      }
       if (SALES_LED_FLOW) {
         const nextAi = pendingCandidateRetry ? "ai_b" : nextAiForSalesFlow();
         pendingCandidateRetry = false;
@@ -500,6 +739,8 @@ wss.on("connection", (clientSocket) => {
         if (pendingStart && sessionReady.ai_a && sessionReady.ai_b) {
           pendingStart = false;
           sendToClient({ type: "sessions_ready" });
+          sendPhaseContextToCandidate(phase);
+          sendPhaseContextToInterviewer(phase);
           if (autoMode) {
             if (SALES_LED_FLOW) {
               waitingForHuman = true;
@@ -576,14 +817,15 @@ wss.on("connection", (clientSocket) => {
         transcriptDone[key] = true;
         logEvent(key, "transcript_done", `len=${finalText.length}`);
         totalTurns += 1;
-        if (SALES_LED_FLOW) {
-          if (key === "ai_b" && introPhase === "student_intro") {
-            if (isStudentIntroSufficient(finalText)) {
-              introPhase = "sales_supplement";
+        if (SALES_LED_FLOW && phase === "pattern2") {
+          if (key === "ai_b") {
+            if (introPhase === "student_intro") {
+              if (isStudentIntroSufficient(finalText)) {
+                introPhase = "sales_supplement";
+              }
             }
-          }
-          if (key === "ai_b" && introPhase === "complete") {
-            pendingCandidateRetry = isCandidateNeedsClarification(finalText);
+            const needsClarification = isCandidateNeedsClarification(finalText);
+            pendingCandidateRetry = needsClarification;
           }
           if (key === "ai_a" && introPhase === "company_overview") {
             introPhase = "complete";
@@ -593,7 +835,9 @@ wss.on("connection", (clientSocket) => {
           updateCoverage(finalText);
         }
         if (endMarkers.some((marker) => finalText.includes(marker))) {
-          if (totalTurns >= MIN_TURNS && hasAllCoverage()) {
+          if (phase === "pattern3") {
+            endSession("marker");
+          } else if (totalTurns >= MIN_TURNS && hasAllCoverage()) {
             endSession("marker");
           } else {
             console.log(
@@ -642,7 +886,8 @@ wss.on("connection", (clientSocket) => {
           const otherSocket = aiSockets[otherKey];
           if (otherSocket && otherSocket.readyState === WebSocket.OPEN) {
             const label = key === "ai_a" ? "Interviewer" : "Candidate";
-            const shouldForward = !SALES_LED_FLOW || key !== "ai_a";
+            const shouldForward =
+              !SALES_LED_FLOW || (phase === "pattern2" && key !== "ai_a");
             if (shouldForward) {
               otherSocket.send(
                 JSON.stringify({
@@ -683,11 +928,17 @@ wss.on("connection", (clientSocket) => {
         lastUserTranscript = normalized;
         lastUserTranscriptAt = now;
         sendToClient({ type: "user_transcript", text: normalized });
-        if (waitingForUserTranscript && lastUserTranscriptAt >= pendingUserCommitAt) {
-          waitingForUserTranscript = false;
-          pendingUserCommitAt = 0;
-          clearUserTranscriptTimer();
-          handleUserUtteranceReady(normalized);
+        if (lastUserTranscriptAt >= pendingUserCommitAt) {
+          const isLateButAcceptable =
+            !waitingForUserTranscript &&
+            pendingUserCommitAt > 0 &&
+            now - pendingUserCommitAt < 8000;
+          if (waitingForUserTranscript || isLateButAcceptable) {
+            waitingForUserTranscript = false;
+            pendingUserCommitAt = 0;
+            clearUserTranscriptTimer();
+            handleUserUtteranceReady(normalized);
+          }
         }
       },
       onInputTranscript: () => {},
@@ -731,6 +982,25 @@ wss.on("connection", (clientSocket) => {
           })
         );
       }
+      if (key === "ai_b" && studentIntroPromptPending) {
+        studentIntroPromptPending = false;
+        socket.send(
+          JSON.stringify({
+            type: "conversation.item.create",
+            item: {
+              type: "message",
+              role: "user",
+              content: [
+                {
+                  type: "input_text",
+                  text:
+                    "Give a very short self-introduction now. Keep it simple and consistent: name + origin + short care/helper experience. Example: 「ジョンです。フィリピン出身。介護施設で補助、少し。」"
+                }
+              ]
+            }
+          })
+        );
+      }
       socket.send(
         JSON.stringify({
           type: "response.create",
@@ -768,6 +1038,8 @@ wss.on("connection", (clientSocket) => {
       data?: string;
       turnId?: number;
       mode?: "auto" | "step";
+      phase?: Phase;
+      scenario?: ScenarioMode;
     };
     try {
       message = JSON.parse(raw.toString());
@@ -784,7 +1056,30 @@ wss.on("connection", (clientSocket) => {
       waitingForHuman = SALES_LED_FLOW;
       lastAiSpeaker = null;
       manualAdvanceReady = false;
-      introPhase = SALES_LED_FLOW ? "sales_intro" : "complete";
+      scenarioMode = message.scenario ?? "unified";
+      if (SALES_LED_FLOW) {
+        if (scenarioMode === "pattern2") {
+          phase = "pattern2";
+        } else if (scenarioMode === "pattern3") {
+          phase = "pattern3";
+        } else {
+          phase = "pattern1";
+        }
+        if (phase === "pattern2") {
+          introPhase = "student_intro";
+        } else if (phase === "pattern3") {
+          introPhase = "complete";
+        } else {
+          introPhase = "sales_intro";
+        }
+        studentIntroPromptPending = false;
+      } else {
+        phase = "pattern2";
+        introPhase = "complete";
+        studentIntroPromptPending = false;
+      }
+      emitPhaseUpdate(phase, "start");
+      lastPhaseNotified = null;
       coverage = {
         experience: false,
         motivation: false,
@@ -795,6 +1090,8 @@ wss.on("connection", (clientSocket) => {
       };
       if (sessionReady.ai_a && sessionReady.ai_b) {
         sendToClient({ type: "sessions_ready" });
+        sendPhaseContextToCandidate(phase);
+        sendPhaseContextToInterviewer(phase);
         if (!SALES_LED_FLOW) {
           if (autoMode) {
             requestAiResponse("ai_a");
@@ -812,6 +1109,15 @@ wss.on("connection", (clientSocket) => {
 
     if (message.type === "request_ai" && message.target) {
       requestAiResponse(message.target);
+      return;
+    }
+
+    if (message.type === "set_phase" && message.phase) {
+      if (scenarioMode !== "unified") {
+        return;
+      }
+      setPhase(message.phase, "manual");
+      waitingForHuman = true;
       return;
     }
 

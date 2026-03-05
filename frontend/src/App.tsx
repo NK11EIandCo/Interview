@@ -114,6 +114,10 @@ export const App = () => {
   const [awaitingUserTranscript, setAwaitingUserTranscript] = useState(false);
   const [noSpeechNotice, setNoSpeechNotice] = useState<string | null>(null);
   const [activeAiStreamingCount, setActiveAiStreamingCount] = useState(0);
+  const [phase, setPhase] = useState<"pattern1" | "pattern2" | "pattern3">("pattern1");
+  const [scenarioMode, setScenarioMode] = useState<
+    "unified" | "pattern1" | "pattern2" | "pattern3"
+  >("unified");
   const [configStatus, setConfigStatus] = useState({
     firebase: false,
     supabase: false
@@ -154,6 +158,8 @@ export const App = () => {
     setAwaitingUserTranscript(false);
     setNoSpeechNotice(null);
     setActiveAiStreamingCount(0);
+    setPhase("pattern1");
+    setScenarioMode("unified");
     activeAiTurnKeysRef.current.clear();
     activeTranscriptRef.current = {};
     pendingTranscriptQueueRef.current = {};
@@ -465,6 +471,17 @@ export const App = () => {
         appendLog("Waiting for OpenAI sessions...");
       }
 
+      if (payload.type === "phase_update") {
+        const nextPhase =
+          payload.phase === "pattern3"
+            ? "pattern3"
+            : payload.phase === "pattern2"
+              ? "pattern2"
+              : "pattern1";
+        setPhase(nextPhase);
+        appendLog(`Phase switched to ${nextPhase}.`);
+      }
+
       if (payload.type === "audio") {
         playAudioChunk(
           payload.data,
@@ -643,7 +660,7 @@ export const App = () => {
             onClick={() => {
               setSessionEnded(false);
               setManualAdvanceReady(false);
-              sendMessage({ type: "start", mode: flowMode });
+              sendMessage({ type: "start", mode: flowMode, scenario: scenarioMode });
             }}
             disabled={wsStatus !== WS_STATUS.open}
           >
@@ -665,6 +682,36 @@ export const App = () => {
               Step
             </button>
           </div>
+          <div className="mode-toggle" role="group" aria-label="Scenario">
+            <button
+              className={scenarioMode === "unified" ? "secondary active" : "ghost"}
+              onClick={() => setScenarioMode("unified")}
+              type="button"
+            >
+              Unified
+            </button>
+            <button
+              className={scenarioMode === "pattern1" ? "secondary active" : "ghost"}
+              onClick={() => setScenarioMode("pattern1")}
+              type="button"
+            >
+              P1 Only
+            </button>
+            <button
+              className={scenarioMode === "pattern2" ? "secondary active" : "ghost"}
+              onClick={() => setScenarioMode("pattern2")}
+              type="button"
+            >
+              P2 Only
+            </button>
+            <button
+              className={scenarioMode === "pattern3" ? "secondary active" : "ghost"}
+              onClick={() => setScenarioMode("pattern3")}
+              type="button"
+            >
+              P3 Only
+            </button>
+          </div>
         </div>
       </section>
 
@@ -677,6 +724,8 @@ export const App = () => {
             <div>Session: {sessionEnded ? "ended" : "active"}</div>
             <div>Mic: {recording ? "streaming" : "idle"}</div>
             <div>Mode: {flowMode}</div>
+            <div>Scenario: {scenarioMode}</div>
+            <div>Phase: {phase}</div>
             <div>Firebase: {configStatus.firebase ? "ready" : "missing"}</div>
             <div>Supabase: {configStatus.supabase ? "ready" : "missing"}</div>
           </div>
@@ -709,6 +758,28 @@ export const App = () => {
                 Next Turn
               </button>
             )}
+            {scenarioMode === "unified" && phase === "pattern1" && (
+              <button
+                className="ghost"
+                onClick={() => sendMessage({ type: "set_phase", phase: "pattern2" })}
+                disabled={
+                  !sessionsReady ||
+                  recording ||
+                  awaitingUserTranscript
+                }
+              >
+                Switch to Pattern 2
+              </button>
+            )}
+            {scenarioMode === "unified" && phase === "pattern2" && (
+              <button
+                className="ghost"
+                onClick={() => sendMessage({ type: "set_phase", phase: "pattern3" })}
+                disabled={!sessionsReady || recording || awaitingUserTranscript}
+              >
+                Switch to Pattern 3
+              </button>
+            )}
           </div>
         </div>
 
@@ -721,7 +792,13 @@ export const App = () => {
       </section>
 
       <section className="panel conversation">
-        <h2>Conversation</h2>
+        <div className="conversation-header">
+          <h2>Conversation</h2>
+          <div className="phase-pill">
+            {scenarioMode === "unified" ? "Unified" : scenarioMode.toUpperCase()} /{" "}
+            {phase === "pattern1" ? "P1" : phase === "pattern2" ? "P2" : "P3"}
+          </div>
+        </div>
         <div className="transcripts chat" ref={transcriptWrapRef}>
           {transcripts.length === 0 && (
             <div className="transcript system">

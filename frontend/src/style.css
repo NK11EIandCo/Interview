@@ -203,6 +203,24 @@ button:not(:disabled):hover {
   width: 100%;
 }
 
+.conversation-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.phase-pill {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--muted);
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--panel-border);
+  background: rgba(255, 255, 255, 0.8);
+}
+
 .transcript.system {
   text-align: center;
   background: #fff;
