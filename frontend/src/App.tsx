@@ -13,7 +13,7 @@ const WS_STATUS = {
 type WsStatus = (typeof WS_STATUS)[keyof typeof WS_STATUS];
 
 type TranscriptItem = {
-  source: "ai_a" | "ai_b" | "user";
+  source: "ai_a" | "ai_b" | "user" | "system";
   name: string;
   text: string;
   status: "streaming" | "final";
@@ -25,6 +25,28 @@ type TranscriptDelta = {
   name: string;
   delta: string;
   turnId: number;
+};
+
+type CandidateLanguageLevel = "basic" | "standard" | "prototype";
+type InterviewIndustry = "care" | "restaurant" | "hotel";
+type InterviewerPersonality =
+  | "balanced"
+  | "meticulous"
+  | "rough"
+  | "curious";
+type InterviewerLiteracy = "low" | "medium" | "high";
+type InterviewerDialect = "standard" | "kansai";
+type InterviewDifficulty = "easy" | "hard";
+
+type CandidateBrief = {
+  industry: string;
+  name: string;
+  nationality: string;
+  targetRole: string;
+  languageLevel: string;
+  experience: string[];
+  strengths: string[];
+  note?: string;
 };
 
 type AppConfig = {
@@ -60,6 +82,8 @@ const getWsUrl = () => {
     : window.location.host;
   return `${protocol}://${host}/ws`;
 };
+
+const SYSTEM_TRANSCRIPT_NAME = "__system__";
 
 const decodeBase64ToInt16 = (base64: string) => {
   const binary = window.atob(base64);
@@ -103,25 +127,155 @@ const initSupabase = (config?: AppConfig["supabase"]): SupabaseClient | null => 
   return createClient(config.url, config.anonKey);
 };
 
+const getCandidateLanguageLevelLabel = (level: CandidateLanguageLevel | string) => {
+  switch (level) {
+    case "basic":
+      return "初級";
+    case "standard":
+      return "中級";
+    case "prototype":
+      return "上級";
+    default:
+      return level;
+  }
+};
+
 export const App = () => {
   const [wsStatus, setWsStatus] = useState<WsStatus>(WS_STATUS.connecting);
   const [sessionsReady, setSessionsReady] = useState(false);
-  const [logs, setLogs] = useState<string[]>([]);
+  const [, setLogs] = useState<string[]>([]);
   const [transcripts, setTranscripts] = useState<TranscriptItem[]>([]);
+  const [scriptHint, setScriptHint] = useState<string | null>(null);
   const [recording, setRecording] = useState(false);
   const [flowMode, setFlowMode] = useState<"auto" | "step">("auto");
+  const [candidateLanguageLevel, setCandidateLanguageLevel] =
+    useState<CandidateLanguageLevel>(() => {
+      try {
+        const saved = window.localStorage.getItem(
+          "interview.candidateLanguageLevel"
+        );
+        if (
+          saved === "basic" ||
+          saved === "standard" ||
+          saved === "prototype"
+        ) {
+          return saved;
+        }
+      } catch {
+        return "basic";
+      }
+      return "basic";
+    });
+  const [industry, setIndustry] = useState<InterviewIndustry>(() => {
+    try {
+      const saved = window.localStorage.getItem("interview.industry");
+      if (
+        saved === "care" ||
+        saved === "restaurant" ||
+        saved === "hotel"
+      ) {
+        return saved;
+      }
+    } catch {
+      return "care";
+    }
+    return "care";
+  });
+  const [interviewerPersonality, setInterviewerPersonality] =
+    useState<InterviewerPersonality>(() => {
+      try {
+        const saved = window.localStorage.getItem("interview.personality");
+        if (
+          saved === "balanced" ||
+          saved === "meticulous" ||
+          saved === "rough" ||
+          saved === "curious"
+        ) {
+          return saved;
+        }
+      } catch {
+        return "balanced";
+      }
+      return "balanced";
+    });
+  const [interviewerLiteracy, setInterviewerLiteracy] =
+    useState<InterviewerLiteracy>(() => {
+      try {
+        const saved = window.localStorage.getItem("interview.literacy");
+        if (saved === "low" || saved === "medium" || saved === "high") {
+          return saved;
+        }
+      } catch {
+        return "medium";
+      }
+      return "medium";
+    });
+  const [interviewerDialect, setInterviewerDialect] =
+    useState<InterviewerDialect>(() => {
+      try {
+        const saved = window.localStorage.getItem("interview.dialect");
+        if (saved === "standard" || saved === "kansai") {
+          return saved;
+        }
+      } catch {
+        return "standard";
+      }
+      return "standard";
+    });
+  const [interviewerDifficulty, setInterviewerDifficulty] =
+    useState<InterviewDifficulty>(() => {
+      try {
+        const saved = window.localStorage.getItem("interview.difficulty");
+        if (saved === "easy" || saved === "hard") {
+          return saved;
+        }
+        if (saved === "beginner") {
+          return "easy";
+        }
+      } catch {
+        return "easy";
+      }
+      return "easy";
+    });
+  const [sceneNote, setSceneNote] = useState(() => {
+    try {
+      return window.localStorage.getItem("interview.sceneNote") ?? "";
+    } catch {
+      return "";
+    }
+  });
   const [manualAdvanceReady, setManualAdvanceReady] = useState(false);
+  const [, setInterruptPending] = useState(false);
   const [awaitingUserTranscript, setAwaitingUserTranscript] = useState(false);
+  const [awaitingAiResponse, setAwaitingAiResponse] = useState(false);
   const [noSpeechNotice, setNoSpeechNotice] = useState<string | null>(null);
   const [activeAiStreamingCount, setActiveAiStreamingCount] = useState(0);
   const [phase, setPhase] = useState<"pattern1" | "pattern2" | "pattern3">("pattern1");
   const [scenarioMode, setScenarioMode] = useState<
     "unified" | "pattern1" | "pattern2" | "pattern3"
   >("unified");
-  const [configStatus, setConfigStatus] = useState({
+  const [candidateProfile, setCandidateProfile] = useState<CandidateBrief | null>(null);
+  const [, setConfigStatus] = useState({
     firebase: false,
     supabase: false
   });
+  const [textInputEnabled, setTextInputEnabled] = useState(() => {
+    try {
+      return window.localStorage.getItem("interview.textInputEnabled") === "true";
+    } catch {
+      return false;
+    }
+  });
+  const [hintEnabled, setHintEnabled] = useState(() => {
+    try {
+      const saved = window.localStorage.getItem("interview.hintEnabled");
+      return saved === null ? true : saved === "true";
+    } catch {
+      return true;
+    }
+  });
+  const [textInputDraft, setTextInputDraft] = useState("");
+  const [sessionStarted, setSessionStarted] = useState(false);
   const [sessionEnded, setSessionEnded] = useState(false);
 
   const wsRef = useRef<WebSocket | null>(null);
@@ -145,6 +299,14 @@ export const App = () => {
   const awaitingUserTimerRef = useRef<number | null>(null);
   const activeAiTurnKeysRef = useRef<Set<string>>(new Set());
   const hasConnectedRef = useRef(false);
+  const interruptPendingRef = useRef(false);
+  const interruptSilenceFramesRef = useRef(0);
+  const interruptStopRequestedRef = useRef(false);
+  const awaitingUserTranscriptRef = useRef(false);
+  const detectedSpeechFramesRef = useRef(0);
+  const speechDetectedRef = useRef(false);
+  const scenarioModeRef = useRef(scenarioMode);
+  const phaseRef = useRef(phase);
 
   const getTurnKey = (source: string, turnId: number) => `${source}:${turnId}`;
 
@@ -154,12 +316,18 @@ export const App = () => {
 
   const resetConversationState = () => {
     setTranscripts([]);
+    setScriptHint(null);
+    setInterruptPending(false);
     setManualAdvanceReady(false);
     setAwaitingUserTranscript(false);
+    setAwaitingAiResponse(false);
     setNoSpeechNotice(null);
     setActiveAiStreamingCount(0);
     setPhase("pattern1");
     setScenarioMode("unified");
+    setCandidateProfile(null);
+    setSessionStarted(false);
+    setSessionEnded(false);
     activeAiTurnKeysRef.current.clear();
     activeTranscriptRef.current = {};
     pendingTranscriptQueueRef.current = {};
@@ -179,6 +347,9 @@ export const App = () => {
       }
     });
     playbackDoneTimerRef.current = {};
+    interruptPendingRef.current = false;
+    interruptSilenceFramesRef.current = 0;
+    interruptStopRequestedRef.current = false;
   };
 
   const markAiStreamingStart = (turnKey: string) => {
@@ -200,10 +371,37 @@ export const App = () => {
     }
   };
 
+  const canStartMic =
+    wsStatus === WS_STATUS.open &&
+    sessionsReady &&
+    !sessionEnded &&
+    !recording &&
+    !awaitingUserTranscript &&
+    !awaitingAiResponse &&
+    activeAiStreamingCount === 0;
+  const settingsLocked = sessionStarted && !sessionEnded;
+  const canSubmitText =
+    textInputEnabled &&
+    wsStatus === WS_STATUS.open &&
+    sessionsReady &&
+    !sessionEnded &&
+    !recording &&
+    !awaitingUserTranscript &&
+    !awaitingAiResponse &&
+    activeAiStreamingCount === 0 &&
+    textInputDraft.trim().length > 0;
+  const canExportConversationPdf = transcripts.length > 0;
+
   const startRecording = async () => {
     if (recordingRef.current) return;
     try {
       setNoSpeechNotice(null);
+      setInterruptPending(false);
+      interruptPendingRef.current = false;
+      interruptSilenceFramesRef.current = 0;
+      interruptStopRequestedRef.current = false;
+      detectedSpeechFramesRef.current = 0;
+      speechDetectedRef.current = false;
       sendMessage({ type: "user_speaking" });
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
@@ -220,9 +418,38 @@ export const App = () => {
       processor.onaudioprocess = (event) => {
         if (!recordingRef.current) return;
         const input = event.inputBuffer.getChannelData(0);
+        let sumSquares = 0;
+        for (let i = 0; i < input.length; i += 1) {
+          sumSquares += input[i] * input[i];
+        }
+        const rms = Math.sqrt(sumSquares / input.length);
+        if (rms >= 0.014) {
+          detectedSpeechFramesRef.current += 1;
+          if (detectedSpeechFramesRef.current >= 2) {
+            speechDetectedRef.current = true;
+          }
+        }
         const int16 = float32ToInt16(input);
         const base64 = encodeInt16ToBase64(int16);
         sendMessage({ type: "user_audio", data: base64 });
+        if (interruptPendingRef.current) {
+          if (rms < 0.012) {
+            interruptSilenceFramesRef.current += 1;
+          } else {
+            interruptSilenceFramesRef.current = 0;
+          }
+          if (
+            interruptSilenceFramesRef.current >= 3 &&
+            !interruptStopRequestedRef.current
+          ) {
+            interruptStopRequestedRef.current = true;
+            window.setTimeout(() => {
+              if (recordingRef.current) {
+                stopRecording("interrupt");
+              }
+            }, 0);
+          }
+        }
       };
 
       source.connect(processor);
@@ -241,33 +468,45 @@ export const App = () => {
     }
   };
 
-  const stopRecording = () => {
+  const stopRecording = (reason: "manual" | "interrupt" = "manual") => {
     if (!recordingRef.current) return;
     recordingRef.current = false;
     setRecording(false);
-    sendMessage({ type: "user_audio_commit" });
-    sendMessage({ type: "user_done" });
-    if (flowMode === "step") {
-      setManualAdvanceReady(true);
-    }
-
-    setAwaitingUserTranscript(true);
+    setInterruptPending(false);
+    interruptPendingRef.current = false;
+    interruptSilenceFramesRef.current = 0;
+    interruptStopRequestedRef.current = false;
+    const hasSpeech = speechDetectedRef.current;
+    speechDetectedRef.current = false;
+    detectedSpeechFramesRef.current = 0;
     if (awaitingUserTimerRef.current) {
       window.clearTimeout(awaitingUserTimerRef.current);
+      awaitingUserTimerRef.current = null;
     }
-    awaitingUserTimerRef.current = window.setTimeout(() => {
+    if (!hasSpeech) {
+      sendMessage({ type: "user_audio_clear" });
+      sendMessage({ type: "user_done" });
       setAwaitingUserTranscript(false);
+      setAwaitingAiResponse(false);
       setNoSpeechNotice("音声が認識されていません。");
-      const nextItem: TranscriptItem = {
-        id: `${Date.now()}-user-${transcriptCounterRef.current++}`,
-        source: "user",
-        name: "You",
-        text: "音声が認識されていません。",
-        status: "final"
-      };
-      setTranscripts((prev) => [...prev, nextItem]);
-      appendLog("No speech detected (client timeout).");
-    }, 4500);
+      setManualAdvanceReady(false);
+      appendLog("No speech detected (client VAD).");
+    } else {
+      sendMessage({ type: "user_audio_commit" });
+      sendMessage({ type: "user_done" });
+      if (flowMode === "step") {
+        setManualAdvanceReady(true);
+      }
+
+      setAwaitingUserTranscript(true);
+      setAwaitingAiResponse(true);
+      awaitingUserTimerRef.current = window.setTimeout(() => {
+        setAwaitingUserTranscript(false);
+        setAwaitingAiResponse(false);
+        setNoSpeechNotice("音声が認識されていません。");
+        appendLog("No speech detected (client timeout).");
+      }, 4500);
+    }
 
     processorRef.current?.disconnect();
     processorRef.current = null;
@@ -278,13 +517,74 @@ export const App = () => {
     mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
     mediaStreamRef.current = null;
 
-    appendLog("Mic streaming off (audio committed).");
+    appendLog(
+      reason === "interrupt"
+        ? "Mic streaming off (AI cut-in after pause)."
+        : "Mic streaming off (audio committed)."
+    );
   };
 
   const requestAdvance = () => {
     sendMessage({ type: "advance" });
     setManualAdvanceReady(false);
   };
+
+  const submitTextInput = () => {
+    const normalized = textInputDraft.trim();
+    if (!normalized || !canSubmitText) return;
+    setNoSpeechNotice(null);
+    setInterruptPending(false);
+    interruptPendingRef.current = false;
+    interruptSilenceFramesRef.current = 0;
+    interruptStopRequestedRef.current = false;
+    setAwaitingUserTranscript(false);
+    setAwaitingAiResponse(true);
+    sendMessage({ type: "user_text", text: normalized });
+    setTextInputDraft("");
+    appendLog("Text input submitted.");
+  };
+
+  const exportConversationPdf = () => {
+    if (!canExportConversationPdf) return;
+    window.print();
+  };
+
+  useEffect(() => {
+    awaitingUserTranscriptRef.current = awaitingUserTranscript;
+  }, [awaitingUserTranscript]);
+
+  useEffect(() => {
+    scenarioModeRef.current = scenarioMode;
+  }, [scenarioMode]);
+
+  useEffect(() => {
+    phaseRef.current = phase;
+  }, [phase]);
+
+  const appendSystemTranscript = (text: string) => {
+    const nextItem: TranscriptItem = {
+      id: `${Date.now()}-system-${transcriptCounterRef.current++}`,
+      source: "system",
+      name: SYSTEM_TRANSCRIPT_NAME,
+      text,
+      status: "final"
+    };
+    setTranscripts((prev) => [...prev, nextItem]);
+  };
+
+  const getPhaseLabel = (nextPhase: "pattern1" | "pattern2" | "pattern3") =>
+    nextPhase === "pattern1"
+      ? "面接前練習"
+      : nextPhase === "pattern2"
+        ? "面接本番"
+        : "面接後ヒアリング";
+
+  const getPhaseActors = (nextPhase: "pattern1" | "pattern2" | "pattern3") =>
+    nextPhase === "pattern1"
+      ? "営業 + 学生AI"
+      : nextPhase === "pattern2"
+        ? "営業 + 学生AI + 面接官AI"
+        : "営業 + 面接官AI";
 
   const playAudioChunk = (
     base64: string,
@@ -435,12 +735,20 @@ export const App = () => {
 
     ws.addEventListener("close", () => {
       setWsStatus(WS_STATUS.closed);
+      setSessionStarted(false);
+      setInterruptPending(false);
+      setAwaitingAiResponse(false);
+      interruptPendingRef.current = false;
       appendLog("WebSocket closed.");
       setManualAdvanceReady(false);
     });
 
     ws.addEventListener("error", () => {
       setWsStatus(WS_STATUS.error);
+      setSessionStarted(false);
+      setInterruptPending(false);
+      setAwaitingAiResponse(false);
+      interruptPendingRef.current = false;
       appendLog("WebSocket error.");
       setManualAdvanceReady(false);
     });
@@ -458,8 +766,24 @@ export const App = () => {
         appendLog("Sessions ready.");
       }
 
+      if (payload.type === "script_hint") {
+        setScriptHint(String(payload.text ?? ""));
+      }
+
+      if (payload.type === "candidate_profile") {
+        setCandidateProfile(payload.profile as CandidateBrief);
+      }
+
+      if (payload.type === "interrupt_pending") {
+        setInterruptPending(true);
+        interruptPendingRef.current = true;
+        interruptSilenceFramesRef.current = 0;
+        appendLog("Interviewer is preparing to cut in.");
+      }
+
       if (payload.type === "session_ended") {
         setSessionEnded(true);
+        setAwaitingAiResponse(false);
         appendLog(
           payload.reason === "max_turns"
             ? "Session ended: max turns reached."
@@ -468,6 +792,9 @@ export const App = () => {
       }
 
       if (payload.type === "waiting_for_sessions") {
+        setInterruptPending(false);
+        setAwaitingAiResponse(false);
+        interruptPendingRef.current = false;
         appendLog("Waiting for OpenAI sessions...");
       }
 
@@ -478,8 +805,22 @@ export const App = () => {
             : payload.phase === "pattern2"
               ? "pattern2"
               : "pattern1";
+        const previousPhase = phaseRef.current;
         setPhase(nextPhase);
         appendLog(`Phase switched to ${nextPhase}.`);
+        if (
+          scenarioModeRef.current === "unified" &&
+          (previousPhase !== nextPhase || payload.reason === "start")
+        ) {
+          appendSystemTranscript(
+            `${getPhaseLabel(nextPhase)}（${getPhaseActors(nextPhase)}）`
+          );
+        }
+      }
+
+      if (payload.type === "human_turn_ready") {
+        setAwaitingAiResponse(false);
+        appendLog("Human turn ready.");
       }
 
       if (payload.type === "audio") {
@@ -491,6 +832,7 @@ export const App = () => {
       }
 
       if (payload.type === "audio_start") {
+        setAwaitingAiResponse(false);
         const sourceKey = String(payload.source ?? "ai_a");
         const turnId = Number(payload.turnId ?? 0);
         const resolvedTurnId =
@@ -583,31 +925,28 @@ export const App = () => {
       }
 
       if (payload.type === "user_no_speech") {
+        setInterruptPending(false);
+        setAwaitingAiResponse(false);
+        interruptPendingRef.current = false;
         if (awaitingUserTimerRef.current) {
           window.clearTimeout(awaitingUserTimerRef.current);
           awaitingUserTimerRef.current = null;
         }
-        if (!awaitingUserTranscript) {
+        if (!awaitingUserTranscriptRef.current) {
           setNoSpeechNotice("音声が認識されていません。");
           appendLog("No speech detected.");
           return;
         }
         setAwaitingUserTranscript(false);
         setNoSpeechNotice("音声が認識されていません。");
-        const nextItem: TranscriptItem = {
-          id: `${Date.now()}-user-${transcriptCounterRef.current++}`,
-          source: "user",
-          name: "You",
-          text: "音声が認識されていません。",
-          status: "final"
-        };
-        setTranscripts((prev) => [...prev, nextItem]);
         setManualAdvanceReady(false);
         appendLog("No speech detected.");
       }
 
       if (payload.type === "user_transcript") {
         const transcriptText = String(payload.text ?? "");
+        setInterruptPending(false);
+        interruptPendingRef.current = false;
         if (awaitingUserTimerRef.current) {
           window.clearTimeout(awaitingUserTimerRef.current);
           awaitingUserTimerRef.current = null;
@@ -625,6 +964,9 @@ export const App = () => {
       }
 
       if (payload.type === "error") {
+        setInterruptPending(false);
+        setAwaitingAiResponse(false);
+        interruptPendingRef.current = false;
         appendLog(`Server error: ${payload.message}`);
       }
     });
@@ -638,18 +980,128 @@ export const App = () => {
     setManualAdvanceReady(false);
   }, [flowMode]);
 
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        "interview.candidateLanguageLevel",
+        candidateLanguageLevel
+      );
+    } catch {
+      return;
+    }
+  }, [candidateLanguageLevel]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem("interview.industry", industry);
+    } catch {
+      return;
+    }
+  }, [industry]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        "interview.personality",
+        interviewerPersonality
+      );
+    } catch {
+      return;
+    }
+  }, [interviewerPersonality]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem("interview.literacy", interviewerLiteracy);
+    } catch {
+      return;
+    }
+  }, [interviewerLiteracy]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem("interview.dialect", interviewerDialect);
+    } catch {
+      return;
+    }
+  }, [interviewerDialect]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem("interview.difficulty", interviewerDifficulty);
+    } catch {
+      return;
+    }
+  }, [interviewerDifficulty]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem("interview.sceneNote", sceneNote);
+    } catch {
+      return;
+    }
+  }, [sceneNote]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        "interview.textInputEnabled",
+        String(textInputEnabled)
+      );
+    } catch {
+      return;
+    }
+  }, [textInputEnabled]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem("interview.hintEnabled", String(hintEnabled));
+    } catch {
+      return;
+    }
+  }, [hintEnabled]);
 
   useEffect(() => {
     if (!transcriptWrapRef.current) return;
     transcriptWrapRef.current.scrollTop = transcriptWrapRef.current.scrollHeight;
   }, [transcripts]);
 
+  const renderScriptHint = () => {
+    if (!hintEnabled) {
+      return (
+        <div className="hint-card hint-card-muted">
+          <p>会話ヒントはオフです。必要な時だけオンにしてください。</p>
+        </div>
+      );
+    }
+
+    if (!scriptHint) {
+      return (
+        <div className="hint-card hint-card-muted">
+          <p>Start Session 後に、現在の Part と次に話す内容のヒントが表示されます。</p>
+        </div>
+      );
+    }
+
+    const [body, meta] = scriptHint.split(" / ");
+
+    return (
+      <div className="hint-card">
+        <div className="hint-card-header">
+          <span className="hint-phase-pill">{getPhaseLabel(phase)}</span>
+          {meta ? <span className="hint-meta-pill">{meta}</span> : null}
+        </div>
+        <p>{body}</p>
+      </div>
+    );
+  };
+
   return (
     <div className="app">
       <section className="hero">
         <div>
-          <p className="eyebrow">ElandCo Interview Lab</p>
-          <h1>3-party interview practice for overseas hiring</h1>
+          <p className="eyebrow">EI & Co.</p>
+          <h1>EI & Co. Interview app</h1>
         </div>
         <p className="subtitle">
           Low-latency voice practice with interviewer + candidate roles powered by
@@ -658,11 +1110,23 @@ export const App = () => {
         <div className="controls">
           <button
             onClick={() => {
+              setSessionStarted(true);
               setSessionEnded(false);
               setManualAdvanceReady(false);
-              sendMessage({ type: "start", mode: flowMode, scenario: scenarioMode });
+              sendMessage({
+                type: "start",
+                mode: flowMode,
+                scenario: scenarioMode,
+                candidateLevel: candidateLanguageLevel,
+                industry,
+                personality: interviewerPersonality,
+                literacy: interviewerLiteracy,
+                dialect: interviewerDialect,
+                difficulty: interviewerDifficulty,
+                note: sceneNote
+              });
             }}
-            disabled={wsStatus !== WS_STATUS.open}
+            disabled={wsStatus !== WS_STATUS.open || settingsLocked}
           >
             Start Session
           </button>
@@ -671,6 +1135,7 @@ export const App = () => {
               className={flowMode === "auto" ? "secondary active" : "ghost"}
               onClick={() => setFlowMode("auto")}
               type="button"
+              disabled={settingsLocked}
             >
               Auto
             </button>
@@ -678,6 +1143,7 @@ export const App = () => {
               className={flowMode === "step" ? "secondary active" : "ghost"}
               onClick={() => setFlowMode("step")}
               type="button"
+              disabled={settingsLocked}
             >
               Step
             </button>
@@ -687,13 +1153,15 @@ export const App = () => {
               className={scenarioMode === "unified" ? "secondary active" : "ghost"}
               onClick={() => setScenarioMode("unified")}
               type="button"
+              disabled={settingsLocked}
             >
-              Unified
+              All
             </button>
             <button
               className={scenarioMode === "pattern1" ? "secondary active" : "ghost"}
               onClick={() => setScenarioMode("pattern1")}
               type="button"
+              disabled={settingsLocked}
             >
               P1 Only
             </button>
@@ -701,6 +1169,7 @@ export const App = () => {
               className={scenarioMode === "pattern2" ? "secondary active" : "ghost"}
               onClick={() => setScenarioMode("pattern2")}
               type="button"
+              disabled={settingsLocked}
             >
               P2 Only
             </button>
@@ -708,122 +1177,450 @@ export const App = () => {
               className={scenarioMode === "pattern3" ? "secondary active" : "ghost"}
               onClick={() => setScenarioMode("pattern3")}
               type="button"
+              disabled={settingsLocked}
             >
               P3 Only
             </button>
           </div>
         </div>
+        <div className="flow-overview" aria-label="このアプリの流れ">
+          <div className="flow-overview-header">
+            <strong>このアプリの流れ</strong>
+            <span>通常は 1 → 2 → 3 の順で進みます</span>
+          </div>
+          <div className="flow-overview-grid">
+            <div className="flow-step">
+              <span>1</span>
+              <strong>面接前練習</strong>
+              <p>営業 + 学生AI</p>
+            </div>
+            <div className="flow-step">
+              <span>2</span>
+              <strong>面接本番</strong>
+              <p>営業 + 学生AI + 面接官AI</p>
+            </div>
+            <div className="flow-step">
+              <span>3</span>
+              <strong>面接後ヒアリング</strong>
+              <p>営業 + 面接官AI</p>
+            </div>
+          </div>
+        </div>
+        <div className="settings-panel" aria-label="求職者設定">
+          <div className="settings-panel-header">
+            <strong>求職者設定</strong>
+            <span>開始前に求職者AIの日本語レベルと業種を選びます</span>
+          </div>
+          <div className="settings-grid">
+            <div className="setting-field">
+              <label>日本語レベル</label>
+              <div className="mode-toggle" role="group" aria-label="Candidate Japanese">
+                <button
+                  className={
+                    candidateLanguageLevel === "basic" ? "secondary active" : "ghost"
+                  }
+                  onClick={() => setCandidateLanguageLevel("basic")}
+                  type="button"
+                  disabled={settingsLocked}
+                >
+                  初級
+                </button>
+                <button
+                  className={
+                    candidateLanguageLevel === "standard"
+                      ? "secondary active"
+                      : "ghost"
+                  }
+                  onClick={() => setCandidateLanguageLevel("standard")}
+                  type="button"
+                  disabled={settingsLocked}
+                >
+                  中級
+                </button>
+                <button
+                  className={
+                    candidateLanguageLevel === "prototype"
+                      ? "secondary active"
+                      : "ghost"
+                  }
+                  onClick={() => setCandidateLanguageLevel("prototype")}
+                  type="button"
+                  disabled={settingsLocked}
+                >
+                  上級
+                </button>
+              </div>
+            </div>
+            <div className="setting-field">
+              <label>業種</label>
+              <div className="mode-toggle" role="group" aria-label="Industry">
+                <button
+                  className={industry === "care" ? "secondary active" : "ghost"}
+                  onClick={() => setIndustry("care")}
+                  type="button"
+                  disabled={settingsLocked}
+                >
+                  介護
+                </button>
+                <button
+                  className={industry === "restaurant" ? "secondary active" : "ghost"}
+                  onClick={() => setIndustry("restaurant")}
+                  type="button"
+                  disabled={settingsLocked}
+                >
+                  外食
+                </button>
+                <button
+                  className={industry === "hotel" ? "secondary active" : "ghost"}
+                  onClick={() => setIndustry("hotel")}
+                  type="button"
+                  disabled={settingsLocked}
+                >
+                  ホテル
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div className="settings-panel" aria-label="面接官設定">
+          <div className="settings-panel-header">
+            <strong>面接官設定</strong>
+            <span>開始前に面接官AIの話し方と難易度を選びます</span>
+          </div>
+          <div className="settings-grid">
+            <div className="setting-field">
+              <label>性格</label>
+              <div className="mode-toggle" role="group" aria-label="Interviewer personality">
+                <button
+                  className={interviewerPersonality === "balanced" ? "secondary active" : "ghost"}
+                  onClick={() => setInterviewerPersonality("balanced")}
+                  type="button"
+                  disabled={settingsLocked}
+                >
+                  標準
+                </button>
+                <button
+                  className={interviewerPersonality === "meticulous" ? "secondary active" : "ghost"}
+                  onClick={() => setInterviewerPersonality("meticulous")}
+                  type="button"
+                  disabled={settingsLocked}
+                >
+                  細かい
+                </button>
+                <button
+                  className={interviewerPersonality === "rough" ? "secondary active" : "ghost"}
+                  onClick={() => setInterviewerPersonality("rough")}
+                  type="button"
+                  disabled={settingsLocked}
+                >
+                  ガサツ
+                </button>
+                <button
+                  className={interviewerPersonality === "curious" ? "secondary active" : "ghost"}
+                  onClick={() => setInterviewerPersonality("curious")}
+                  type="button"
+                  disabled={settingsLocked}
+                >
+                  質問多め
+                </button>
+              </div>
+            </div>
+            <div className="setting-field">
+              <label>リテラシー</label>
+              <div className="mode-toggle" role="group" aria-label="Interviewer literacy">
+                <button
+                  className={interviewerLiteracy === "low" ? "secondary active" : "ghost"}
+                  onClick={() => setInterviewerLiteracy("low")}
+                  type="button"
+                  disabled={settingsLocked}
+                >
+                  低
+                </button>
+                <button
+                  className={interviewerLiteracy === "medium" ? "secondary active" : "ghost"}
+                  onClick={() => setInterviewerLiteracy("medium")}
+                  type="button"
+                  disabled={settingsLocked}
+                >
+                  中
+                </button>
+                <button
+                  className={interviewerLiteracy === "high" ? "secondary active" : "ghost"}
+                  onClick={() => setInterviewerLiteracy("high")}
+                  type="button"
+                  disabled={settingsLocked}
+                >
+                  高
+                </button>
+              </div>
+            </div>
+            <div className="setting-field">
+              <label>方言</label>
+              <div className="mode-toggle" role="group" aria-label="Interviewer dialect">
+                <button
+                  className={interviewerDialect === "standard" ? "secondary active" : "ghost"}
+                  onClick={() => setInterviewerDialect("standard")}
+                  type="button"
+                  disabled={settingsLocked}
+                >
+                  標準語
+                </button>
+                <button
+                  className={interviewerDialect === "kansai" ? "secondary active" : "ghost"}
+                  onClick={() => setInterviewerDialect("kansai")}
+                  type="button"
+                  disabled={settingsLocked}
+                >
+                  関西弁
+                </button>
+              </div>
+            </div>
+            <div className="setting-field">
+              <label>難易度</label>
+              <div className="mode-toggle" role="group" aria-label="Interviewer difficulty">
+                <button
+                  className={interviewerDifficulty === "easy" ? "secondary active" : "ghost"}
+                  onClick={() => setInterviewerDifficulty("easy")}
+                  type="button"
+                  disabled={settingsLocked}
+                >
+                  イージー
+                </button>
+                <button
+                  className={interviewerDifficulty === "hard" ? "secondary active" : "ghost"}
+                  onClick={() => setInterviewerDifficulty("hard")}
+                  type="button"
+                  disabled={settingsLocked}
+                >
+                  ハード
+                </button>
+              </div>
+            </div>
+            <div className="setting-field setting-field-note">
+              <label htmlFor="scene-note">補足テキスト</label>
+              <textarea
+                id="scene-note"
+                value={sceneNote}
+                onChange={(event) => setSceneNote(event.target.value)}
+                disabled={settingsLocked}
+                placeholder="例: 初めての面接 / 以前外国人雇用でトラブルがあった企業"
+                rows={3}
+              />
+            </div>
+          </div>
+        </div>
+        {settingsLocked && (
+          <div className="session-lock-note">
+            セッション中は開始前設定を変更できません。変更する場合はセッション終了後に再設定してください。
+          </div>
+        )}
       </section>
 
-      <section className="top-row">
-        <div className="panel">
-          <h2>Status</h2>
-          <div className="status">
-            <div>WebSocket: {wsStatus}</div>
-            <div>OpenAI sessions: {sessionsReady ? "ready" : "not ready"}</div>
-            <div>Session: {sessionEnded ? "ended" : "active"}</div>
-            <div>Mic: {recording ? "streaming" : "idle"}</div>
-            <div>Mode: {flowMode}</div>
-            <div>Scenario: {scenarioMode}</div>
-            <div>Phase: {phase}</div>
-            <div>Firebase: {configStatus.firebase ? "ready" : "missing"}</div>
-            <div>Supabase: {configStatus.supabase ? "ready" : "missing"}</div>
+      {candidateProfile && (
+        <section className="panel candidate-brief">
+          <div className="conversation-header">
+            <h2>Candidate Brief</h2>
+            <div className="phase-pill">{candidateProfile.industry}</div>
           </div>
-          <div className="controls" style={{ marginTop: 16 }}>
-            <button
-              onClick={startRecording}
-              disabled={!sessionsReady || recording}
-            >
-              Start Mic
-            </button>
-            <button
-              className="ghost"
-              onClick={stopRecording}
-              disabled={!recording}
-            >
-              Stop + Commit
-            </button>
-            {flowMode === "step" && (
-              <button
-                className="secondary"
-                onClick={requestAdvance}
-                disabled={
-                  !manualAdvanceReady ||
-                  !sessionsReady ||
-                  recording ||
-                  awaitingUserTranscript ||
-                  activeAiStreamingCount > 0
-                }
-              >
-                Next Turn
-              </button>
-            )}
-            {scenarioMode === "unified" && phase === "pattern1" && (
-              <button
-                className="ghost"
-                onClick={() => sendMessage({ type: "set_phase", phase: "pattern2" })}
-                disabled={
-                  !sessionsReady ||
-                  recording ||
-                  awaitingUserTranscript
-                }
-              >
-                Switch to Pattern 2
-              </button>
-            )}
-            {scenarioMode === "unified" && phase === "pattern2" && (
-              <button
-                className="ghost"
-                onClick={() => sendMessage({ type: "set_phase", phase: "pattern3" })}
-                disabled={!sessionsReady || recording || awaitingUserTranscript}
-              >
-                Switch to Pattern 3
-              </button>
-            )}
+          <div className="brief-grid">
+            <div className="brief-card">
+              <span>基本情報</span>
+              <ul>
+                <li>氏名: {candidateProfile.name}</li>
+                <li>国籍: {candidateProfile.nationality}</li>
+                <li>想定職種: {candidateProfile.targetRole}</li>
+                <li>日本語レベル: {getCandidateLanguageLevelLabel(candidateProfile.languageLevel)}</li>
+              </ul>
+            </div>
+            <div className="brief-card">
+              <span>これまでの経験</span>
+              <ul>
+                {candidateProfile.experience.map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ul>
+            </div>
+            <div className="brief-card">
+              <span>強み・補足</span>
+              <ul>
+                {candidateProfile.strengths.map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+                {candidateProfile.note ? <li>{candidateProfile.note}</li> : null}
+              </ul>
+            </div>
           </div>
-        </div>
+        </section>
+      )}
 
-        <div className="panel">
-          <h2>Activity Log</h2>
-          <div className="log">
-            {logs.length === 0 ? "No activity." : logs.join("\n")}
+      <section className="panel conversation-hint-panel">
+        <div className="conversation-header">
+          <div className="hint-panel-header">
+            <h2>会話ヒント</h2>
+            <p>次に話す内容の目安を表示します</p>
+          </div>
+          <div className="mode-toggle" role="group" aria-label="Hints">
+            <button
+              className={hintEnabled ? "secondary active" : "ghost"}
+              onClick={() => setHintEnabled(true)}
+              type="button"
+            >
+              On
+            </button>
+            <button
+              className={!hintEnabled ? "secondary active" : "ghost"}
+              onClick={() => setHintEnabled(false)}
+              type="button"
+            >
+              Off
+            </button>
           </div>
         </div>
+        {renderScriptHint()}
       </section>
 
       <section className="panel conversation">
         <div className="conversation-header">
           <h2>Conversation</h2>
-          <div className="phase-pill">
-            {scenarioMode === "unified" ? "Unified" : scenarioMode.toUpperCase()} /{" "}
-            {phase === "pattern1" ? "P1" : phase === "pattern2" ? "P2" : "P3"}
+          <div className="conversation-actions">
+            <button
+              className="secondary export-action"
+              disabled={!canExportConversationPdf}
+              onClick={exportConversationPdf}
+              type="button"
+            >
+              PDF出力
+            </button>
+            <div className="mode-toggle" role="group" aria-label="Input mode">
+              <button
+                className={!textInputEnabled ? "secondary active" : "ghost"}
+                onClick={() => setTextInputEnabled(false)}
+                type="button"
+              >
+                音声入力
+              </button>
+              <button
+                className={textInputEnabled ? "secondary active" : "ghost"}
+                onClick={() => setTextInputEnabled(true)}
+                type="button"
+              >
+                テキスト入力
+              </button>
+            </div>
           </div>
         </div>
         <div className="transcripts chat" ref={transcriptWrapRef}>
-          {transcripts.length === 0 && (
-            <div className="transcript system">
-              <span>system</span>
-              No transcripts yet.
-            </div>
-          )}
-          {noSpeechNotice && (
-            <div className="transcript system">
-              <span>system</span>
-              {noSpeechNotice}
-            </div>
-          )}
           {transcripts.map((item) => (
             <div
               className={`transcript bubble ${item.source} ${item.status}`}
               key={item.id}
             >
-              <div className="avatar" aria-hidden="true" />
-              <div className="bubble-body">
-                <span>{item.name}</span>
-                <p>{item.text || "(no transcript)"}</p>
-              </div>
+              {item.source === "system" ? (
+                <div className="phase-divider-body">
+                  <span>{item.name}</span>
+                  <p>{item.text}</p>
+                </div>
+              ) : (
+                <>
+                  <div className="avatar" aria-hidden="true" />
+                  <div className="bubble-body">
+                    <span>{item.name}</span>
+                    <p>{item.text || (item.status === "streaming" ? "…" : "")}</p>
+                  </div>
+                </>
+              )}
             </div>
           ))}
+          {noSpeechNotice && (
+            <div className="transcript system system-notice">
+              <div className="system-notice-illustration" aria-hidden="true">
+                <div className="system-notice-mic" />
+                <div className="system-notice-wave wave-1" />
+                <div className="system-notice-wave wave-2" />
+              </div>
+              <div className="system-notice-body">
+                <span>system</span>
+                <strong>{noSpeechNotice}</strong>
+                <p>無音、雑音、または音量不足の可能性があります。</p>
+                <p>もう一度 Start Mic を押して、短く区切って話してください。</p>
+                <button
+                  onClick={() => startRecording()}
+                  disabled={!canStartMic}
+                  type="button"
+                >
+                  もう一度録音する
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+        <div className="conversation-controls">
+          {textInputEnabled ? (
+            <div className="text-input-controls">
+              <textarea
+                value={textInputDraft}
+                onChange={(event) => setTextInputDraft(event.target.value)}
+                placeholder="デバッグ用に営業発話を入力して送信します"
+                rows={2}
+                onKeyDown={(event) => {
+                  if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+                    event.preventDefault();
+                    submitTextInput();
+                  }
+                }}
+                disabled={!sessionsReady || sessionEnded || recording}
+              />
+              <button onClick={submitTextInput} disabled={!canSubmitText}>
+                テキスト送信
+              </button>
+            </div>
+          ) : (
+            <>
+              <button onClick={startRecording} disabled={!canStartMic}>
+                Start Mic
+              </button>
+              <button
+                className="secondary stop-action"
+                onClick={() => stopRecording()}
+                disabled={!recording}
+              >
+                Stop + Commit
+              </button>
+            </>
+          )}
+          {flowMode === "step" && (
+            <button
+              className="secondary"
+              onClick={requestAdvance}
+              disabled={
+                !manualAdvanceReady ||
+                !sessionsReady ||
+                recording ||
+                awaitingUserTranscript ||
+                activeAiStreamingCount > 0
+              }
+            >
+              Next Turn
+            </button>
+          )}
+          {scenarioMode === "unified" && phase === "pattern1" && (
+            <button
+              className="secondary phase-action"
+              onClick={() => sendMessage({ type: "set_phase", phase: "pattern2" })}
+              disabled={!sessionsReady || recording || awaitingUserTranscript}
+            >
+              面接本番へ進む
+            </button>
+          )}
+          {scenarioMode === "unified" && phase === "pattern2" && (
+            <button
+              className="secondary phase-action"
+              onClick={() => sendMessage({ type: "set_phase", phase: "pattern3" })}
+              disabled={!sessionsReady || recording || awaitingUserTranscript}
+            >
+              面接後ヒアリングへ進む
+            </button>
+          )}
         </div>
       </section>
     </div>
