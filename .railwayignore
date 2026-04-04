@@ -1,0 +1,16 @@
+.git
+.gitignore
+.tmp_pdfprobe
+example
+frontend/node_modules
+frontend/dist
+server/node_modules
+server/dist
+server/.env
+pattern1.pdf
+pattern2.pdf
+pattern3.pdf
+txt_ver_prompt.txt
+他社事例.png
+台本.txt
+url.txt
