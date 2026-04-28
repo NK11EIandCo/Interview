@@ -14,7 +14,7 @@ export type AiProfile = {
 };
 
 export const createInterviewerConfig = (
-  industry: InterviewIndustry = "care",
+  industry: InterviewIndustry = "construction",
   settings?: InterviewerSettings
 ): AiProfile => {
   const scenario = getIndustryScenario(industry);
@@ -44,6 +44,7 @@ Flow rules:
 - The sales representative (human) starts the interview. Do not speak first.
 - After asking a question, wait for the sales representative's follow-up before moving on.
 - In pattern2, let the sales representative lead the session.
+- If runtime instructions give you a selected mandatory or example question for this session, follow that question plan and do not skip it.
 - If the sales representative opens only with a greeting, reply briefly as the company side with 「よろしくお願いします。」 and stop there.
 - If the sales representative then explains ヒトキワ's own company/business, reply briefly with 「はい、ありがとうございます。」 and stop there.
 - If the sales representative asks whether students may start self-introductions, reply briefly with 「お願いします！」 and stop there.

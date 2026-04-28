@@ -21,6 +21,7 @@ body {
   background: radial-gradient(circle at top left, #ffe9d2 0%, #f7f2e9 45%, #f1ede6 100%);
   color: var(--ink);
   min-height: 100vh;
+  line-height: 1.55;
 }
 
 #app {
@@ -28,17 +29,17 @@ body {
 }
 
 .app {
-  width: min(1120px, 100%);
+  width: min(1240px, 100%);
   margin: 0 auto;
-  padding: 48px 20px 80px;
+  padding: 44px 24px 80px;
   display: grid;
   gap: 24px;
 }
 
 .hero {
   display: grid;
-  gap: 16px;
-  padding: 28px 32px;
+  gap: 18px;
+  padding: 32px 36px;
   background: linear-gradient(135deg, #fff2dd 0%, #fff7ec 50%, #f2f9f7 100%);
   border-radius: 24px;
   border: 1px solid var(--panel-border);
@@ -54,14 +55,16 @@ body {
 }
 
 .hero h1 {
-  font-size: clamp(28px, 4vw, 40px);
+  font-size: clamp(32px, 4vw, 44px);
   margin: 0;
 }
 
 .subtitle {
   margin: 0;
   color: var(--muted);
-  max-width: 520px;
+  max-width: 620px;
+  font-size: 16px;
+  line-height: 1.65;
 }
 
 .grid {
@@ -85,11 +88,11 @@ body {
 }
 
 .flow-overview-header strong {
-  font-size: 15px;
+  font-size: 16px;
 }
 
 .flow-overview-header span {
-  font-size: 13px;
+  font-size: 14px;
   color: var(--muted);
 }
 
@@ -115,12 +118,12 @@ body {
 }
 
 .flow-step strong {
-  font-size: 15px;
+  font-size: 16px;
 }
 
 .flow-step p {
   margin: 0;
-  font-size: 13px;
+  font-size: 14px;
   color: var(--muted);
   line-height: 1.5;
 }
@@ -148,7 +151,7 @@ body {
 
 .hint-panel-header p {
   margin: 0;
-  font-size: 13px;
+  font-size: 14px;
   color: var(--muted);
 }
 
@@ -230,13 +233,13 @@ body {
   background: var(--panel);
   border-radius: 20px;
   border: 1px solid var(--panel-border);
-  padding: 20px;
+  padding: 24px;
   box-shadow: 0 10px 30px rgba(44, 39, 33, 0.08);
 }
 
 .panel h2 {
   margin: 0 0 12px;
-  font-size: 18px;
+  font-size: 20px;
 }
 
 .status {
@@ -249,8 +252,8 @@ body {
 
 button {
   font-family: var(--mono);
-  font-size: 13px;
-  padding: 10px 16px;
+  font-size: 14px;
+  padding: 11px 18px;
   border-radius: 999px;
   border: 1px solid transparent;
   background: var(--accent);
@@ -292,7 +295,7 @@ button:not(:disabled):hover {
 .settings-panel {
   display: grid;
   gap: 12px;
-  padding: 16px 18px;
+  padding: 18px 20px;
   border-radius: 18px;
   border: 1px solid var(--panel-border);
   background: rgba(255, 255, 255, 0.72);
@@ -304,11 +307,11 @@ button:not(:disabled):hover {
 }
 
 .settings-panel-header strong {
-  font-size: 15px;
+  font-size: 17px;
 }
 
 .settings-panel-header span {
-  font-size: 13px;
+  font-size: 14px;
   color: var(--muted);
 }
 
@@ -323,7 +326,7 @@ button:not(:disabled):hover {
 }
 
 .setting-field label {
-  font-size: 13px;
+  font-size: 14px;
   color: var(--muted);
 }
 
@@ -331,7 +334,7 @@ button:not(:disabled):hover {
   width: 100%;
   resize: vertical;
   min-height: 84px;
-  padding: 12px 14px;
+  padding: 13px 16px;
   border-radius: 14px;
   border: 1px solid var(--panel-border);
   background: rgba(255, 248, 238, 0.9);
@@ -345,7 +348,7 @@ button:not(:disabled):hover {
 }
 
 .session-lock-note {
-  font-size: 13px;
+  font-size: 14px;
   color: var(--muted);
   margin-top: -4px;
 }
@@ -360,7 +363,7 @@ button:not(:disabled):hover {
 }
 
 .mode-toggle button {
-  padding: 8px 14px;
+  padding: 9px 16px;
 }
 
 .mode-toggle button.active {
@@ -421,15 +424,15 @@ button:not(:disabled):hover {
   display: flex;
   align-items: center;
   gap: 10px;
-  width: min(680px, 100%);
+  width: min(960px, 100%);
 }
 
 .text-input-controls textarea {
   flex: 1;
   resize: vertical;
-  min-height: 52px;
+  min-height: 56px;
   max-height: 120px;
-  padding: 12px 14px;
+  padding: 14px 16px;
   border-radius: 16px;
   border: 1px solid var(--panel-border);
   background: rgba(255, 255, 255, 0.92);
@@ -452,6 +455,12 @@ button:not(:disabled):hover {
   background: #eef4ff;
   border-color: #c8d7ff;
   color: #2e5fc7;
+}
+
+.conversation-controls .restart-action {
+  background: #f6f2ff;
+  border-color: #d7caf8;
+  color: #5b46a8;
 }
 
 .conversation-header {
@@ -626,7 +635,7 @@ button:not(:disabled):hover {
 
 .phase-divider-body p {
   margin: 0;
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 600;
   color: var(--ink);
 }

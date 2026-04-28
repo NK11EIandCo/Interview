@@ -28,7 +28,14 @@ type TranscriptDelta = {
 };
 
 type CandidateLanguageLevel = "basic" | "standard" | "prototype";
-type InterviewIndustry = "care" | "restaurant" | "hotel";
+type InterviewIndustry =
+  | "construction"
+  | "food"
+  | "manufacturing"
+  | "lodging"
+  | "restaurant"
+  | "hotel"
+  | "care";
 type InterviewerPersonality =
   | "balanced"
   | "meticulous"
@@ -84,6 +91,7 @@ const getWsUrl = () => {
 };
 
 const SYSTEM_TRANSCRIPT_NAME = "__system__";
+const USER_TRANSCRIPT_TIMEOUT_MS = 8000;
 
 const decodeBase64ToInt16 = (base64: string) => {
   const binary = window.atob(base64);
@@ -140,6 +148,13 @@ const getCandidateLanguageLevelLabel = (level: CandidateLanguageLevel | string) 
   }
 };
 
+type SystemNotice = {
+  kind: "no_speech" | "relay_target_unclear";
+  title: string;
+  detail: string;
+  guidance: string;
+};
+
 export const App = () => {
   const [wsStatus, setWsStatus] = useState<WsStatus>(WS_STATUS.connecting);
   const [sessionsReady, setSessionsReady] = useState(false);
@@ -170,16 +185,19 @@ export const App = () => {
     try {
       const saved = window.localStorage.getItem("interview.industry");
       if (
-        saved === "care" ||
+        saved === "construction" ||
+        saved === "food" ||
+        saved === "manufacturing" ||
+        saved === "lodging" ||
         saved === "restaurant" ||
         saved === "hotel"
       ) {
         return saved;
       }
     } catch {
-      return "care";
+      return "construction";
     }
-    return "care";
+    return "construction";
   });
   const [interviewerPersonality, setInterviewerPersonality] =
     useState<InterviewerPersonality>(() => {
@@ -248,7 +266,7 @@ export const App = () => {
   const [, setInterruptPending] = useState(false);
   const [awaitingUserTranscript, setAwaitingUserTranscript] = useState(false);
   const [awaitingAiResponse, setAwaitingAiResponse] = useState(false);
-  const [noSpeechNotice, setNoSpeechNotice] = useState<string | null>(null);
+  const [systemNotice, setSystemNotice] = useState<SystemNotice | null>(null);
   const [activeAiStreamingCount, setActiveAiStreamingCount] = useState(0);
   const [phase, setPhase] = useState<"pattern1" | "pattern2" | "pattern3">("pattern1");
   const [scenarioMode, setScenarioMode] = useState<
@@ -293,6 +311,10 @@ export const App = () => {
   const pendingFinalRef = useRef<Record<string, string | null>>({});
   const pendingFinalNameRef = useRef<Record<string, string>>({});
   const playbackDoneTimerRef = useRef<Record<string, number | null>>({});
+  const playbackSafetyTimerRef = useRef<Record<string, number | null>>({});
+  const playbackReportedRef = useRef<Record<string, boolean>>({});
+  const finalizeSafetyTimerRef = useRef<Record<string, number | null>>({});
+  const finalizeTimerRef = useRef<Record<string, number | null>>({});
   const audioDoneRef = useRef<Record<string, boolean>>({});
   const activeTurnRef = useRef<Record<string, number>>({});
   const finalizedTurnRef = useRef<Record<string, boolean>>({});
@@ -313,6 +335,34 @@ export const App = () => {
   const appendLog = (message: string) => {
     setLogs((prev) => [message, ...prev].slice(0, 30));
   };
+  const clearSystemNotice = () => {
+    setSystemNotice(null);
+  };
+  const showNoSpeechNotice = () => {
+    setSystemNotice({
+      kind: "no_speech",
+      title: "音声が認識されていません。",
+      detail: "無音、雑音、または音量不足の可能性があります。",
+      guidance: "もう一度 Start Mic を押して、短く区切って話してください。"
+    });
+  };
+  const showRelayTargetUnclearNotice = (noticePhase?: "pattern1" | "pattern2" | "pattern3") => {
+    if (noticePhase === "pattern3") {
+      setSystemNotice({
+        kind: "relay_target_unclear",
+        title: "返答不要の発話として処理されました。",
+        detail: "そのまま発言を続けてください。",
+        guidance: ""
+      });
+      return;
+    }
+    setSystemNotice({
+      kind: "relay_target_unclear",
+      title: "この発話だけでは次の相手が決まりませんでした。",
+      detail: "候補者向けか面接官向けか判断できないか、返答不要の発話として処理されました。",
+      guidance: "そのまま続けて、誰に向けた発話か少し分かるように話してください。"
+    });
+  };
 
   const resetConversationState = () => {
     setTranscripts([]);
@@ -321,7 +371,7 @@ export const App = () => {
     setManualAdvanceReady(false);
     setAwaitingUserTranscript(false);
     setAwaitingAiResponse(false);
-    setNoSpeechNotice(null);
+    clearSystemNotice();
     setActiveAiStreamingCount(0);
     setPhase("pattern1");
     setScenarioMode("unified");
@@ -347,6 +397,25 @@ export const App = () => {
       }
     });
     playbackDoneTimerRef.current = {};
+    Object.values(playbackSafetyTimerRef.current).forEach((timerId) => {
+      if (timerId) {
+        window.clearTimeout(timerId);
+      }
+    });
+    playbackSafetyTimerRef.current = {};
+    Object.values(finalizeSafetyTimerRef.current).forEach((timerId) => {
+      if (timerId) {
+        window.clearTimeout(timerId);
+      }
+    });
+    finalizeSafetyTimerRef.current = {};
+    Object.values(finalizeTimerRef.current).forEach((timerId) => {
+      if (timerId) {
+        window.clearTimeout(timerId);
+      }
+    });
+    finalizeTimerRef.current = {};
+    playbackReportedRef.current = {};
     interruptPendingRef.current = false;
     interruptSilenceFramesRef.current = 0;
     interruptStopRequestedRef.current = false;
@@ -365,10 +434,102 @@ export const App = () => {
     }
   };
 
+  const reportPlaybackDone = (
+    sourceKey: string,
+    turnId: number,
+    turnKey: string
+  ) => {
+    if (playbackReportedRef.current[turnKey]) return;
+    playbackReportedRef.current[turnKey] = true;
+    if (playbackDoneTimerRef.current[turnKey]) {
+      window.clearTimeout(playbackDoneTimerRef.current[turnKey] ?? 0);
+      playbackDoneTimerRef.current[turnKey] = null;
+    }
+    if (playbackSafetyTimerRef.current[turnKey]) {
+      window.clearTimeout(playbackSafetyTimerRef.current[turnKey] ?? 0);
+      playbackSafetyTimerRef.current[turnKey] = null;
+    }
+    sendMessage({ type: "audio_playback_done", target: sourceKey, turnId });
+  };
+
+  const forceFinalizeTurn = (turnKey: string) => {
+    if (playbackDoneTimerRef.current[turnKey]) {
+      window.clearTimeout(playbackDoneTimerRef.current[turnKey] ?? 0);
+      playbackDoneTimerRef.current[turnKey] = null;
+    }
+    if (playbackSafetyTimerRef.current[turnKey]) {
+      window.clearTimeout(playbackSafetyTimerRef.current[turnKey] ?? 0);
+      playbackSafetyTimerRef.current[turnKey] = null;
+    }
+    if (finalizeSafetyTimerRef.current[turnKey]) {
+      window.clearTimeout(finalizeSafetyTimerRef.current[turnKey] ?? 0);
+      finalizeSafetyTimerRef.current[turnKey] = null;
+    }
+    if (finalizeTimerRef.current[turnKey]) {
+      window.clearTimeout(finalizeTimerRef.current[turnKey] ?? 0);
+      finalizeTimerRef.current[turnKey] = null;
+    }
+    const finalText = pendingFinalRef.current[turnKey];
+    const finalName = pendingFinalNameRef.current[turnKey] ?? "Speaker";
+    const source = turnKey.startsWith("ai_b:") ? "ai_b" : "ai_a";
+    const currentId = activeTranscriptRef.current[turnKey];
+
+    if (currentId && finalText) {
+      setTranscripts((prev) =>
+        prev.map((item) =>
+          item.id === currentId ? { ...item, text: finalText, status: "final" } : item
+        )
+      );
+      delete activeTranscriptRef.current[turnKey];
+    } else if (finalText) {
+      const finalItem: TranscriptItem = {
+        id: `${Date.now()}-${turnKey}-${transcriptCounterRef.current++}`,
+        source,
+        name: finalName,
+        text: finalText,
+        status: "final"
+      };
+      setTranscripts((prev) => [...prev, finalItem]);
+    }
+
+    pendingFinalRef.current[turnKey] = null;
+    pendingTranscriptQueueRef.current[turnKey] = [];
+    audioDoneRef.current[turnKey] = false;
+    finalizedTurnRef.current[turnKey] = true;
+    markAiStreamingDone(turnKey);
+  };
+
+  const forceFinalizePendingAiTurns = () => {
+    Array.from(activeAiTurnKeysRef.current).forEach((turnKey) => {
+      if (!finalizedTurnRef.current[turnKey]) {
+        forceFinalizeTurn(turnKey);
+      }
+    });
+  };
+
   const sendMessage = (payload: object) => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify(payload));
     }
+  };
+  const startSession = () => {
+    clearSystemNotice();
+    resetConversationState();
+    setSessionStarted(true);
+    setSessionEnded(false);
+    setManualAdvanceReady(false);
+    sendMessage({
+      type: "start",
+      mode: flowMode,
+      scenario: scenarioMode,
+      candidateLevel: candidateLanguageLevel,
+      industry,
+      personality: interviewerPersonality,
+      literacy: interviewerLiteracy,
+      dialect: interviewerDialect,
+      difficulty: interviewerDifficulty,
+      note: sceneNote
+    });
   };
 
   const canStartMic =
@@ -395,7 +556,7 @@ export const App = () => {
   const startRecording = async () => {
     if (recordingRef.current) return;
     try {
-      setNoSpeechNotice(null);
+      clearSystemNotice();
       setInterruptPending(false);
       interruptPendingRef.current = false;
       interruptSilenceFramesRef.current = 0;
@@ -406,7 +567,10 @@ export const App = () => {
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           channelCount: 1,
-          sampleRate: 24000
+          sampleRate: 24000,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
         }
       });
       const audioContext = new AudioContext({ sampleRate: 24000 });
@@ -488,7 +652,7 @@ export const App = () => {
       sendMessage({ type: "user_done" });
       setAwaitingUserTranscript(false);
       setAwaitingAiResponse(false);
-      setNoSpeechNotice("音声が認識されていません。");
+      showNoSpeechNotice();
       setManualAdvanceReady(false);
       appendLog("No speech detected (client VAD).");
     } else {
@@ -503,9 +667,9 @@ export const App = () => {
       awaitingUserTimerRef.current = window.setTimeout(() => {
         setAwaitingUserTranscript(false);
         setAwaitingAiResponse(false);
-        setNoSpeechNotice("音声が認識されていません。");
+        showNoSpeechNotice();
         appendLog("No speech detected (client timeout).");
-      }, 4500);
+      }, USER_TRANSCRIPT_TIMEOUT_MS);
     }
 
     processorRef.current?.disconnect();
@@ -532,7 +696,7 @@ export const App = () => {
   const submitTextInput = () => {
     const normalized = textInputDraft.trim();
     if (!normalized || !canSubmitText) return;
-    setNoSpeechNotice(null);
+    clearSystemNotice();
     setInterruptPending(false);
     interruptPendingRef.current = false;
     interruptSilenceFramesRef.current = 0;
@@ -629,7 +793,13 @@ export const App = () => {
 
     const delayMs = Math.max(0, (startTime - ctx.currentTime) * 1000);
     window.setTimeout(() => {
+      if (finalizedTurnRef.current[turnKey]) {
+        return;
+      }
       setTranscripts((prev) => {
+        if (finalizedTurnRef.current[turnKey]) {
+          return prev;
+        }
         const currentId = activeTranscriptRef.current[turnKey];
         if (!currentId) {
           const nextId = `${Date.now()}-${turnKey}-${transcriptCounterRef.current++}`;
@@ -671,6 +841,9 @@ export const App = () => {
     const finalName = pendingFinalNameRef.current[turnKey] ?? "Speaker";
 
     const finalize = (text: string, name: string) => {
+      if (finalizedTurnRef.current[turnKey]) {
+        return;
+      }
       setTranscripts((prev) => {
         const currentId = activeTranscriptRef.current[turnKey];
         if (currentId) {
@@ -700,11 +873,18 @@ export const App = () => {
       pendingTranscriptQueueRef.current[turnKey] = [];
       audioDoneRef.current[turnKey] = false;
       finalizedTurnRef.current[turnKey] = true;
+      finalizeTimerRef.current[turnKey] = null;
     };
 
     if (ctx) {
       const delayMs = Math.max(0, (endTime - ctx.currentTime) * 1000);
-      window.setTimeout(() => finalize(finalText, finalName), delayMs);
+      if (finalizeTimerRef.current[turnKey]) {
+        window.clearTimeout(finalizeTimerRef.current[turnKey] ?? 0);
+      }
+      finalizeTimerRef.current[turnKey] = window.setTimeout(
+        () => finalize(finalText, finalName),
+        delayMs
+      );
     } else {
       finalize(finalText, finalName);
     }
@@ -782,6 +962,7 @@ export const App = () => {
       }
 
       if (payload.type === "session_ended") {
+        clearSystemNotice();
         setSessionEnded(true);
         setAwaitingAiResponse(false);
         appendLog(
@@ -799,6 +980,7 @@ export const App = () => {
       }
 
       if (payload.type === "phase_update") {
+        clearSystemNotice();
         const nextPhase =
           payload.phase === "pattern3"
             ? "pattern3"
@@ -820,6 +1002,7 @@ export const App = () => {
 
       if (payload.type === "human_turn_ready") {
         setAwaitingAiResponse(false);
+        forceFinalizePendingAiTurns();
         appendLog("Human turn ready.");
       }
 
@@ -842,6 +1025,19 @@ export const App = () => {
         activeTurnRef.current[sourceKey] = resolvedTurnId;
         const turnKey = getTurnKey(sourceKey, resolvedTurnId);
         markAiStreamingStart(turnKey);
+        playbackReportedRef.current[turnKey] = false;
+        if (playbackDoneTimerRef.current[turnKey]) {
+          window.clearTimeout(playbackDoneTimerRef.current[turnKey] ?? 0);
+          playbackDoneTimerRef.current[turnKey] = null;
+        }
+        if (playbackSafetyTimerRef.current[turnKey]) {
+          window.clearTimeout(playbackSafetyTimerRef.current[turnKey] ?? 0);
+          playbackSafetyTimerRef.current[turnKey] = null;
+        }
+        if (finalizeSafetyTimerRef.current[turnKey]) {
+          window.clearTimeout(finalizeSafetyTimerRef.current[turnKey] ?? 0);
+          finalizeSafetyTimerRef.current[turnKey] = null;
+        }
         const currentId = activeTranscriptRef.current[turnKey];
         if (!currentId) {
           const nextId = `${Date.now()}-${turnKey}-${transcriptCounterRef.current++}`;
@@ -897,6 +1093,12 @@ export const App = () => {
           payload.name ?? pendingFinalNameRef.current[turnKey] ?? "Speaker"
         );
         scheduleFinalize(sourceKey as TranscriptDelta["source"], resolvedTurnId);
+        if (finalizeSafetyTimerRef.current[turnKey]) {
+          window.clearTimeout(finalizeSafetyTimerRef.current[turnKey] ?? 0);
+        }
+        finalizeSafetyTimerRef.current[turnKey] = window.setTimeout(() => {
+          scheduleFinalize(sourceKey as TranscriptDelta["source"], resolvedTurnId);
+        }, 1600);
       }
 
       if (payload.type === "audio_done") {
@@ -909,6 +1111,12 @@ export const App = () => {
         const turnKey = getTurnKey(sourceKey, resolvedTurnId);
         audioDoneRef.current[turnKey] = true;
         scheduleFinalize(sourceKey as TranscriptDelta["source"], resolvedTurnId);
+        if (finalizeSafetyTimerRef.current[turnKey]) {
+          window.clearTimeout(finalizeSafetyTimerRef.current[turnKey] ?? 0);
+        }
+        finalizeSafetyTimerRef.current[turnKey] = window.setTimeout(() => {
+          scheduleFinalize(sourceKey as TranscriptDelta["source"], resolvedTurnId);
+        }, 1600);
         if (playbackContextRef.current) {
           const ctx = playbackContextRef.current;
           const endTime = playbackEndTimeRef.current[turnKey] ?? ctx.currentTime;
@@ -917,10 +1125,16 @@ export const App = () => {
             window.clearTimeout(playbackDoneTimerRef.current[turnKey] ?? 0);
           }
           playbackDoneTimerRef.current[turnKey] = window.setTimeout(() => {
-            sendMessage({ type: "audio_playback_done", target: sourceKey, turnId });
+            reportPlaybackDone(sourceKey, turnId, turnKey);
           }, delayMs);
+          if (playbackSafetyTimerRef.current[turnKey]) {
+            window.clearTimeout(playbackSafetyTimerRef.current[turnKey] ?? 0);
+          }
+          playbackSafetyTimerRef.current[turnKey] = window.setTimeout(() => {
+            reportPlaybackDone(sourceKey, turnId, turnKey);
+          }, Math.max(delayMs + 500, 1500));
         } else {
-          sendMessage({ type: "audio_playback_done", target: sourceKey, turnId });
+          reportPlaybackDone(sourceKey, turnId, turnKey);
         }
       }
 
@@ -933,14 +1147,34 @@ export const App = () => {
           awaitingUserTimerRef.current = null;
         }
         if (!awaitingUserTranscriptRef.current) {
-          setNoSpeechNotice("音声が認識されていません。");
+          showNoSpeechNotice();
           appendLog("No speech detected.");
           return;
         }
         setAwaitingUserTranscript(false);
-        setNoSpeechNotice("音声が認識されていません。");
+        showNoSpeechNotice();
         setManualAdvanceReady(false);
         appendLog("No speech detected.");
+      }
+
+      if (payload.type === "relay_target_unclear") {
+        setInterruptPending(false);
+        setAwaitingAiResponse(false);
+        interruptPendingRef.current = false;
+        if (awaitingUserTimerRef.current) {
+          window.clearTimeout(awaitingUserTimerRef.current);
+          awaitingUserTimerRef.current = null;
+        }
+        setAwaitingUserTranscript(false);
+        setManualAdvanceReady(false);
+        showRelayTargetUnclearNotice(
+          payload.phase === "pattern1" ||
+            payload.phase === "pattern2" ||
+            payload.phase === "pattern3"
+            ? payload.phase
+            : phaseRef.current
+        );
+        appendLog("Could not determine the target speaker.");
       }
 
       if (payload.type === "user_transcript") {
@@ -952,7 +1186,7 @@ export const App = () => {
           awaitingUserTimerRef.current = null;
         }
         setAwaitingUserTranscript(false);
-        setNoSpeechNotice(null);
+        clearSystemNotice();
         const nextItem: TranscriptItem = {
           id: `${Date.now()}-user-${transcriptCounterRef.current++}`,
           source: "user",
@@ -1100,7 +1334,6 @@ export const App = () => {
     <div className="app">
       <section className="hero">
         <div>
-          <p className="eyebrow">EI & Co.</p>
           <h1>EI & Co. Interview app</h1>
         </div>
         <p className="subtitle">
@@ -1109,23 +1342,7 @@ export const App = () => {
         </p>
         <div className="controls">
           <button
-            onClick={() => {
-              setSessionStarted(true);
-              setSessionEnded(false);
-              setManualAdvanceReady(false);
-              sendMessage({
-                type: "start",
-                mode: flowMode,
-                scenario: scenarioMode,
-                candidateLevel: candidateLanguageLevel,
-                industry,
-                personality: interviewerPersonality,
-                literacy: interviewerLiteracy,
-                dialect: interviewerDialect,
-                difficulty: interviewerDifficulty,
-                note: sceneNote
-              });
-            }}
+            onClick={startSession}
             disabled={wsStatus !== WS_STATUS.open || settingsLocked}
           >
             Start Session
@@ -1255,12 +1472,36 @@ export const App = () => {
               <label>業種</label>
               <div className="mode-toggle" role="group" aria-label="Industry">
                 <button
-                  className={industry === "care" ? "secondary active" : "ghost"}
-                  onClick={() => setIndustry("care")}
+                  className={industry === "construction" ? "secondary active" : "ghost"}
+                  onClick={() => setIndustry("construction")}
                   type="button"
                   disabled={settingsLocked}
                 >
-                  介護
+                  建築
+                </button>
+                <button
+                  className={industry === "food" ? "secondary active" : "ghost"}
+                  onClick={() => setIndustry("food")}
+                  type="button"
+                  disabled={settingsLocked}
+                >
+                  飲食
+                </button>
+                <button
+                  className={industry === "manufacturing" ? "secondary active" : "ghost"}
+                  onClick={() => setIndustry("manufacturing")}
+                  type="button"
+                  disabled={settingsLocked}
+                >
+                  製造
+                </button>
+                <button
+                  className={industry === "lodging" ? "secondary active" : "ghost"}
+                  onClick={() => setIndustry("lodging")}
+                  type="button"
+                  disabled={settingsLocked}
+                >
+                  宿泊
                 </button>
                 <button
                   className={industry === "restaurant" ? "secondary active" : "ghost"}
@@ -1289,7 +1530,7 @@ export const App = () => {
           </div>
           <div className="settings-grid">
             <div className="setting-field">
-              <label>性格</label>
+              <label>性格（未実装）</label>
               <div className="mode-toggle" role="group" aria-label="Interviewer personality">
                 <button
                   className={interviewerPersonality === "balanced" ? "secondary active" : "ghost"}
@@ -1326,7 +1567,7 @@ export const App = () => {
               </div>
             </div>
             <div className="setting-field">
-              <label>リテラシー</label>
+              <label>リテラシー（未実装）</label>
               <div className="mode-toggle" role="group" aria-label="Interviewer literacy">
                 <button
                   className={interviewerLiteracy === "low" ? "secondary active" : "ghost"}
@@ -1355,7 +1596,7 @@ export const App = () => {
               </div>
             </div>
             <div className="setting-field">
-              <label>方言</label>
+              <label>方言（未実装）</label>
               <div className="mode-toggle" role="group" aria-label="Interviewer dialect">
                 <button
                   className={interviewerDialect === "standard" ? "secondary active" : "ghost"}
@@ -1531,7 +1772,7 @@ export const App = () => {
               )}
             </div>
           ))}
-          {noSpeechNotice && (
+          {systemNotice && (
             <div className="transcript system system-notice">
               <div className="system-notice-illustration" aria-hidden="true">
                 <div className="system-notice-mic" />
@@ -1540,15 +1781,25 @@ export const App = () => {
               </div>
               <div className="system-notice-body">
                 <span>system</span>
-                <strong>{noSpeechNotice}</strong>
-                <p>無音、雑音、または音量不足の可能性があります。</p>
-                <p>もう一度 Start Mic を押して、短く区切って話してください。</p>
+                <strong>{systemNotice.title}</strong>
+                <p>{systemNotice.detail}</p>
+                <p>{systemNotice.guidance}</p>
                 <button
-                  onClick={() => startRecording()}
-                  disabled={!canStartMic}
+                  onClick={() => {
+                    if (textInputEnabled) {
+                      clearSystemNotice();
+                      return;
+                    }
+                    void startRecording();
+                  }}
+                  disabled={textInputEnabled ? false : !canStartMic}
                   type="button"
                 >
-                  もう一度録音する
+                  {textInputEnabled
+                    ? "入力を続ける"
+                    : systemNotice.kind === "relay_target_unclear"
+                      ? "続けて話す"
+                      : "もう一度録音する"}
                 </button>
               </div>
             </div>
@@ -1621,6 +1872,20 @@ export const App = () => {
               面接後ヒアリングへ進む
             </button>
           )}
+          <button
+            className="secondary restart-action"
+            onClick={startSession}
+            disabled={
+              wsStatus !== WS_STATUS.open ||
+              recording ||
+              awaitingUserTranscript ||
+              awaitingAiResponse ||
+              activeAiStreamingCount > 0
+            }
+            type="button"
+          >
+            同じ設定でもう一度練習する
+          </button>
         </div>
       </section>
     </div>

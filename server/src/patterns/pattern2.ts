@@ -7,11 +7,11 @@ import type { InterviewIndustry } from "../industry.js";
 import type { InterviewerSettings } from "../interviewerSettings.js";
 
 export const createPattern2InterviewerConfig = (
-  industry: InterviewIndustry = "care",
+  industry: InterviewIndustry = "construction",
   settings?: InterviewerSettings
 ) => createInterviewerConfig(industry, settings);
 
 export const createPattern2StudentConfig = (
   level: CandidateLanguageLevel = "basic",
-  industry: InterviewIndustry = "care"
+  industry: InterviewIndustry = "construction"
 ) => createCandidateConfig(level, industry);
