@@ -3468,7 +3468,7 @@ wss.on("connection", (clientSocket) => {
       const studyTips =
         interviewIndustry === "construction"
           ? "Mention that special pre-study is not mandatory, but knowing basic safety words and common tool names helps someone start the work more smoothly."
-          : interviewIndustry === "food" || interviewIndustry === "restaurant"
+          : interviewIndustry === "food"
             ? "Mention that special pre-study is not mandatory, but learning simple service Japanese, menu terms, and hygiene-related words helps someone start the work more smoothly."
             : interviewIndustry === "manufacturing"
               ? "Mention that special pre-study is not mandatory, but learning basic safety words, simple process vocabulary, and common tool or machine names helps someone start the work more smoothly."

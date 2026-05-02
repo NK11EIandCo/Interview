@@ -2,8 +2,6 @@ export type InterviewIndustry =
   | "construction"
   | "food"
   | "manufacturing"
-  | "lodging"
-  | "restaurant"
   | "hotel"
   | "care";
 
@@ -144,9 +142,9 @@ const INDUSTRY_SCENARIOS: Record<InterviewIndustry, IndustryScenario> = {
     candidateBackgroundContext:
       "Your default background: from the Philippines, with some experience at a casual food-service workplace. You have helped with hall service, clearing tables, and simple plating support.",
     candidateSelfIntroExample:
-      "マリアです。フィリピン出身。飲食の仕事、少し経験あります。",
+      "ジョンです。フィリピン出身。飲食の仕事、少し経験あります。",
     candidateProfile: {
-      name: "マリア",
+      name: "ジョン",
       nationality: "フィリピン",
       targetRole: "飲食スタッフ候補",
       experience: [
@@ -234,9 +232,9 @@ const INDUSTRY_SCENARIOS: Record<InterviewIndustry, IndustryScenario> = {
     candidateBackgroundContext:
       "Your default background: from Myanmar, with some experience at a factory. You have mainly helped with inspection, sorting, packing, and keeping the line area clean.",
     candidateSelfIntroExample:
-      "アウンです。ミャンマー出身。製造の仕事、少し経験あります。",
+      "ジョンです。ミャンマー出身。製造の仕事、少し経験あります。",
     candidateProfile: {
-      name: "アウン",
+      name: "ジョン",
       nationality: "ミャンマー",
       targetRole: "製造スタッフ候補",
       experience: [
@@ -313,186 +311,6 @@ const INDUSTRY_SCENARIOS: Record<InterviewIndustry, IndustryScenario> = {
       }
     ]
   },
-  lodging: {
-    id: "lodging",
-    label: "宿泊",
-    interviewerRole: "hiring manager at a Japanese lodging company",
-    interviewerCompanyContext:
-      "Your company runs lodging and hospitality operations in Japan. Typical duties include guest guidance, front desk support, room checks, cleaning support, breakfast service support, and teamwork with hospitality staff.",
-    companyOverviewGuidance:
-      "Describe the role as lodging or hospitality support work, including guest guidance, front desk assistance, room checks, cleaning support, breakfast support, and careful customer service.",
-    candidateBackgroundContext:
-      "Your default background: from Vietnam, with some experience at a lodging or hospitality workplace. You have helped with room checks, cleaning support, and simple guest guidance.",
-    candidateSelfIntroExample:
-      "リンです。ベトナム出身。宿泊の仕事、少し経験あります。",
-    candidateProfile: {
-      name: "リン",
-      nationality: "ベトナム",
-      targetRole: "宿泊スタッフ候補",
-      experience: [
-        "宿泊施設で客室チェックと清掃補助を経験",
-        "フロント補助や館内案内も少し担当"
-      ],
-      strengths: ["丁寧な接客を意識している", "清潔さと時間管理を大切にしている"]
-    },
-    introKeywords: ["宿泊", "補助", "客室", "清掃", "フロント"],
-    experienceKeywords: [
-      "宿泊",
-      "客室",
-      "清掃",
-      "フロント",
-      "案内",
-      "朝食",
-      "チェック",
-      "受付",
-      "補助"
-    ],
-    experienceRetryHint:
-      "今はこれまでの宿泊施設での仕事を、フロント補助・客室チェック・清掃補助・館内案内など短い言葉で答えてください。",
-    experienceFollowUpPrompt:
-      "Ask one short Japanese follow-up about specific lodging tasks such as フロント補助・客室チェック・清掃補助・館内案内 before moving on.",
-    candidateExperienceQuestionPrompt:
-      "これまで宿泊施設でどのような仕事をしましたか",
-    pattern3CareerPathExample:
-      "将来的には、外国人スタッフの教育、客室やフロントのシフト調整、備品在庫管理、サービス品質の確認などを任せていくイメージです。",
-    experienceTopics: [
-      {
-        key: "front_desk",
-        label: "フロント補助",
-        keywords: ["フロント", "受付", "チェックイン", "チェックアウト"],
-        followUpPrompts: [
-          "Ask one short Japanese follow-up about what they did at the front desk.",
-          "Ask one short Japanese follow-up about how they supported reception work."
-        ]
-      },
-      {
-        key: "room_check",
-        label: "客室チェック",
-        keywords: ["客室", "ルーム", "チェック", "確認"],
-        followUpPrompts: [
-          "Ask one short Japanese follow-up about room checks or inspection work.",
-          "Ask one short Japanese follow-up about what they checked in guest rooms."
-        ]
-      },
-      {
-        key: "cleaning_support",
-        label: "清掃補助",
-        keywords: ["清掃", "ベッドメイク", "掃除"],
-        followUpPrompts: [
-          "Ask one short Japanese follow-up about cleaning support or room preparation.",
-          "Ask one short Japanese follow-up about their role in cleaning or bed-making."
-        ]
-      },
-      {
-        key: "guest_guidance",
-        label: "館内案内",
-        keywords: ["案内", "お客様", "館内", "接客"],
-        followUpPrompts: [
-          "Ask one short Japanese follow-up about how they guided guests or explained facilities.",
-          "Ask one short Japanese follow-up about guest support or hospitality work they handled."
-        ]
-      },
-      {
-        key: "breakfast_support",
-        label: "朝食対応",
-        keywords: ["朝食", "配膳", "レストラン", "サービス"],
-        followUpPrompts: [
-          "Ask one short Japanese follow-up about breakfast service support.",
-          "Ask one short Japanese follow-up about what they did during breakfast operations."
-        ]
-      }
-    ]
-  },
-  restaurant: {
-    id: "restaurant",
-    label: "外食",
-    interviewerRole: "hiring manager at a Japanese restaurant company",
-    interviewerCompanyContext:
-      "Your company runs restaurants in Japan. Typical duties include hall service, taking orders, serving food and drinks, simple food preparation, cleaning, and busy-hour teamwork.",
-    companyOverviewGuidance:
-      "Describe the role as restaurant floor and store support work, including customer service, order taking, serving meals, simple preparation, cleaning, and teamwork during busy hours.",
-    candidateBackgroundContext:
-      "Your default background: from the Philippines, with some experience at a casual restaurant. You have helped with hall service, clearing tables, and simple plating support.",
-    candidateSelfIntroExample:
-      "マリアです。フィリピン出身。外食の仕事、少し経験あります。",
-    candidateProfile: {
-      name: "マリア",
-      nationality: "フィリピン",
-      targetRole: "外食店舗スタッフ候補",
-      experience: [
-        "カジュアルレストランでホール接客と簡単な盛り付け補助を経験",
-        "忙しい時間帯の案内や片付けも担当"
-      ],
-      strengths: ["明るい接客を意識している", "立ち仕事や忙しい時間帯にも前向き"]
-    },
-    introKeywords: ["レストラン", "接客", "ホール", "盛り付け", "片付け"],
-    experienceKeywords: [
-      "接客",
-      "ホール",
-      "配膳",
-      "注文",
-      "レジ",
-      "盛り付け",
-      "片付け",
-      "案内",
-      "清掃"
-    ],
-    experienceRetryHint:
-      "今はこれまでの外食店での仕事を、接客・配膳・注文・盛り付け・片付けなど短い言葉で答えてください。",
-    experienceFollowUpPrompt:
-      "Ask one short Japanese follow-up about specific restaurant tasks such as 接客・配膳・注文対応・盛り付け・片付け before moving on.",
-    candidateExperienceQuestionPrompt:
-      "これまで外食店でどのような仕事をしましたか",
-    pattern3CareerPathExample:
-      "将来的には、外国人スタッフの指導、シフト作成補助、在庫管理、衛生管理などを任せていくイメージです。",
-    experienceTopics: [
-      {
-        key: "customer_service",
-        label: "接客",
-        keywords: ["接客", "案内", "お客様", "ホール"],
-        followUpPrompts: [
-          "Ask one short Japanese follow-up about what kind of customer service they handled.",
-          "Ask one short Japanese follow-up about how they interacted with customers on the floor."
-        ]
-      },
-      {
-        key: "order_taking",
-        label: "注文対応",
-        keywords: ["注文", "オーダー", "ハンディ", "レジ"],
-        followUpPrompts: [
-          "Ask one short Japanese follow-up about taking orders or handling checkout.",
-          "Ask one short Japanese follow-up about how they handled customer orders."
-        ]
-      },
-      {
-        key: "serving",
-        label: "配膳",
-        keywords: ["配膳", "料理", "ドリンク", "運ぶ"],
-        followUpPrompts: [
-          "Ask one short Japanese follow-up about serving food or drinks.",
-          "Ask one short Japanese follow-up about what they actually did when serving customers."
-        ]
-      },
-      {
-        key: "plating",
-        label: "盛り付け",
-        keywords: ["盛り付け", "仕込み", "簡単な調理", "キッチン"],
-        followUpPrompts: [
-          "Ask one short Japanese follow-up about simple kitchen prep or plating support.",
-          "Ask one short Japanese follow-up about what kind of back-of-house support they did."
-        ]
-      },
-      {
-        key: "cleanup",
-        label: "片付け・清掃",
-        keywords: ["片付け", "清掃", "下げ", "洗い場"],
-        followUpPrompts: [
-          "Ask one short Japanese follow-up about cleanup or table clearing work.",
-          "Ask one short Japanese follow-up about what they handled during store cleanup."
-        ]
-      }
-    ]
-  },
   hotel: {
     id: "hotel",
     label: "ホテル",
@@ -504,9 +322,9 @@ const INDUSTRY_SCENARIOS: Record<InterviewIndustry, IndustryScenario> = {
     candidateBackgroundContext:
       "Your default background: from Vietnam, with some experience at a business hotel. You have helped with room checks, cleaning support, and simple front desk guidance.",
     candidateSelfIntroExample:
-      "リンです。ベトナム出身。ホテルの仕事、少し経験あります。",
+      "ジョンです。ベトナム出身。ホテルの仕事、少し経験あります。",
     candidateProfile: {
-      name: "リン",
+      name: "ジョン",
       nationality: "ベトナム",
       targetRole: "ホテルスタッフ候補",
       experience: [

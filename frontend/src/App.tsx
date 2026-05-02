@@ -32,8 +32,6 @@ type InterviewIndustry =
   | "construction"
   | "food"
   | "manufacturing"
-  | "lodging"
-  | "restaurant"
   | "hotel"
   | "care";
 type InterviewerPersonality =
@@ -188,8 +186,6 @@ export const App = () => {
         saved === "construction" ||
         saved === "food" ||
         saved === "manufacturing" ||
-        saved === "lodging" ||
-        saved === "restaurant" ||
         saved === "hotel"
       ) {
         return saved;
@@ -374,7 +370,6 @@ export const App = () => {
     clearSystemNotice();
     setActiveAiStreamingCount(0);
     setPhase("pattern1");
-    setScenarioMode("unified");
     setCandidateProfile(null);
     setSessionStarted(false);
     setSessionEnded(false);
@@ -1336,10 +1331,6 @@ export const App = () => {
         <div>
           <h1>EI & Co. Interview app</h1>
         </div>
-        <p className="subtitle">
-          Low-latency voice practice with interviewer + candidate roles powered by
-          OpenAI Realtime.
-        </p>
         <div className="controls">
           <button
             onClick={startSession}
@@ -1496,28 +1487,12 @@ export const App = () => {
                   製造
                 </button>
                 <button
-                  className={industry === "lodging" ? "secondary active" : "ghost"}
-                  onClick={() => setIndustry("lodging")}
-                  type="button"
-                  disabled={settingsLocked}
-                >
-                  宿泊
-                </button>
-                <button
-                  className={industry === "restaurant" ? "secondary active" : "ghost"}
-                  onClick={() => setIndustry("restaurant")}
-                  type="button"
-                  disabled={settingsLocked}
-                >
-                  外食
-                </button>
-                <button
                   className={industry === "hotel" ? "secondary active" : "ghost"}
                   onClick={() => setIndustry("hotel")}
                   type="button"
                   disabled={settingsLocked}
                 >
-                  ホテル
+                  宿泊
                 </button>
               </div>
             </div>
@@ -1854,20 +1829,30 @@ export const App = () => {
               Next Turn
             </button>
           )}
-          {scenarioMode === "unified" && phase === "pattern1" && (
+          {phase === "pattern1" && (
             <button
               className="secondary phase-action"
               onClick={() => sendMessage({ type: "set_phase", phase: "pattern2" })}
-              disabled={!sessionsReady || recording || awaitingUserTranscript}
+              disabled={
+                scenarioMode !== "unified" ||
+                !sessionsReady ||
+                recording ||
+                awaitingUserTranscript
+              }
             >
               面接本番へ進む
             </button>
           )}
-          {scenarioMode === "unified" && phase === "pattern2" && (
+          {phase === "pattern2" && (
             <button
               className="secondary phase-action"
               onClick={() => sendMessage({ type: "set_phase", phase: "pattern3" })}
-              disabled={!sessionsReady || recording || awaitingUserTranscript}
+              disabled={
+                scenarioMode !== "unified" ||
+                !sessionsReady ||
+                recording ||
+                awaitingUserTranscript
+              }
             >
               面接後ヒアリングへ進む
             </button>

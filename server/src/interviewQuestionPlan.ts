@@ -615,8 +615,8 @@ const PATTERN3_WINDOW_ORDER: InterviewQuestionWindow[] = [
 ];
 
 const normalizeIndustryFamily = (industry: InterviewIndustry) => {
-  if (industry === "food" || industry === "restaurant") return "food";
-  if (industry === "lodging" || industry === "hotel") return "lodging";
+  if (industry === "food") return "food";
+  if (industry === "hotel") return "lodging";
   if (industry === "manufacturing") return "manufacturing";
   if (industry === "construction") return "construction";
   return "generic";
