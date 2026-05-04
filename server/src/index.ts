@@ -393,6 +393,7 @@ wss.on("connection", (clientSocket) => {
   let pendingPattern3IssuedQuestionId: string | null = null;
   let pattern3FinalQuestionLoopActive = false;
   let pattern3ExplicitMandatoryQuestionIds: Record<string, true> = {};
+  let pattern3ExplicitExtraQuestionIds: Record<string, true> = {};
   let pattern2StartTimingAsked = false;
   let pattern2VisaHandoffAsked = false;
   let pendingCandidateRetry = false;
@@ -1868,19 +1869,35 @@ wss.on("connection", (clientSocket) => {
   };
   const getPendingPattern3SelectedQuestions = () =>
     pattern3SelectedQuestions.filter((question) => !hasAskedInterviewerQuestion(question.id));
+  const isPattern3ExtraQuestion = (question: InterviewQuestionSpec) =>
+    question.phase === "pattern3" && question.target === "sales" && !question.mandatory;
   const getPendingMandatoryPattern3Questions = () =>
     pattern3SelectedQuestions.filter(
       (question) => question.mandatory && !hasAskedInterviewerQuestion(question.id)
     );
+  const getPendingExtraPattern3Questions = () =>
+    pattern3SelectedQuestions.filter(
+      (question) => isPattern3ExtraQuestion(question) && !hasAskedInterviewerQuestion(question.id)
+    );
   const getPattern3ExplicitMandatoryQuestionCount = () =>
     Object.keys(pattern3ExplicitMandatoryQuestionIds).length;
+  const getPattern3ExplicitExtraQuestionCount = () =>
+    Object.keys(pattern3ExplicitExtraQuestionIds).length;
   const markPattern3QuestionIssued = (question: InterviewQuestionSpec) => {
     pendingPattern3IssuedQuestionId = question.id;
     askedInterviewerQuestionIds[question.id] = true;
     if (question.phase === "pattern3" && question.target === "sales" && question.mandatory) {
       pattern3ExplicitMandatoryQuestionIds[question.id] = true;
     }
+    if (isPattern3ExtraQuestion(question)) {
+      pattern3ExplicitExtraQuestionIds[question.id] = true;
+    }
   };
+  const getPattern3SelectedQuestionPlanOrder = (question: InterviewQuestionSpec) =>
+    Math.max(
+      0,
+      pattern3SelectedQuestions.findIndex((candidate) => candidate.id === question.id)
+    );
   const getNextPendingMandatoryPattern3Question = (
     currentSection: Pattern3Section
   ) => {
@@ -1910,6 +1927,140 @@ wss.on("connection", (clientSocket) => {
         );
       }) ?? null
     );
+  };
+  const getNextPendingHardPattern3ExtraQuestion = (
+    currentSection: Pattern3Section
+  ) => {
+    if (currentSection === "opening") return null;
+    const currentRank = getPattern3SectionRank(currentSection);
+    const pendingExtraQuestions = getPendingExtraPattern3Questions();
+    const sortByPlanOrder = (questions: InterviewQuestionSpec[]) =>
+      [...questions].sort(
+        (left, right) =>
+          getPattern3SelectedQuestionPlanOrder(left) -
+          getPattern3SelectedQuestionPlanOrder(right)
+      );
+    const exactMatch = sortByPlanOrder(
+      pendingExtraQuestions.filter(
+        (question) =>
+          getPattern3SectionForQuestionWindow(question.window) === currentSection
+      )
+    )[0] ?? null;
+    if (exactMatch) return exactMatch;
+    const overdueMatch = sortByPlanOrder(
+      pendingExtraQuestions.filter((question) => {
+        const questionSection = getPattern3SectionForQuestionWindow(question.window);
+        return (
+          questionSection !== null &&
+          getPattern3SectionRank(questionSection) < currentRank
+        );
+      })
+    )[0] ?? null;
+    if (overdueMatch) return overdueMatch;
+    return null;
+  };
+  const getNextPendingPattern3LoopQuestion = (
+    currentSection: Pattern3Section
+  ) => {
+    if (interviewerSettings.difficulty !== "hard") {
+      return getNextPendingMandatoryPattern3Question(currentSection);
+    }
+    const pendingQuestions = getPendingPattern3SelectedQuestions();
+    if (!pendingQuestions.length) return null;
+    return [...pendingQuestions].sort((left, right) => {
+      if (left.mandatory !== right.mandatory) {
+        return left.mandatory ? -1 : 1;
+      }
+      const leftSection = getPattern3SectionForQuestionWindow(left.window);
+      const rightSection = getPattern3SectionForQuestionWindow(right.window);
+      const leftRank =
+        leftSection === null ? Number.MAX_SAFE_INTEGER : getPattern3SectionRank(leftSection);
+      const rightRank =
+        rightSection === null ? Number.MAX_SAFE_INTEGER : getPattern3SectionRank(rightSection);
+      if (leftRank !== rightRank) {
+        return leftRank - rightRank;
+      }
+      return (
+        getPattern3SelectedQuestionPlanOrder(left) -
+        getPattern3SelectedQuestionPlanOrder(right)
+      );
+    })[0] ?? null;
+  };
+  const PATTERN3_BRIDGE_PATTERNS: Array<{ label: string; pattern: RegExp }> = [
+    { label: "関連して", pattern: /関連して/u },
+    { label: "ちなみに", pattern: /ちなみに/u },
+    { label: "一点確認ですが", pattern: /一点確認ですが/u },
+    { label: "確認ですが", pattern: /確認ですが/u },
+    { label: "あと一点", pattern: /あと一点/u },
+    { label: "もう一点だけ", pattern: /もう一点だけ/u },
+    { label: "念のため", pattern: /念のため/u },
+    { label: "差し支えなければ", pattern: /差し支えなければ/u }
+  ];
+  const detectPattern3BridgeLabel = (text: string) =>
+    PATTERN3_BRIDGE_PATTERNS.find(({ pattern }) => pattern.test(text))?.label ?? null;
+  const getRecentPattern3QuestionBridgeAvoidanceHint = () => {
+    const recentInterviewerTexts = [...conversationHistory]
+      .reverse()
+      .filter((entry) => entry.speaker === "interviewer" && entry.phase === "pattern3")
+      .slice(0, 3)
+      .map((entry) => entry.text);
+    if (!recentInterviewerTexts.length) return "";
+    const recentLabels = recentInterviewerTexts
+      .map((text) => detectPattern3BridgeLabel(text))
+      .filter((label): label is string => Boolean(label));
+    if (!recentLabels.length) {
+      return "You do not need to force a bridge every time; after a short acknowledgement, it is also fine to ask the next question directly.";
+    }
+    const latestLabel = recentLabels[0];
+    const repeatedLatestCount = recentLabels.filter((label) => label === latestLabel).length;
+    if (repeatedLatestCount >= 2) {
+      return `The recent company-side questions already repeated the bridge phrase 「${latestLabel}」. This turn should not use another stock bridge phrase at all. After a short acknowledgement, ask the next question directly in a natural sentence.`;
+    }
+    const uniqueRecentLabels = [...new Set(recentLabels)].map((label) => `「${label}」`);
+    return `The immediately previous company-side question already used the bridge phrase 「${latestLabel}」. Do not reuse it in this turn. Also avoid quickly repeating recently used bridges such as ${uniqueRecentLabels.join("、")}. After a short acknowledgement, either ask the next question directly or switch to a clearly different natural opener.`;
+  };
+  const getPattern3RemainingQuestionCountAfterCurrent = (
+    question: InterviewQuestionSpec
+  ) => {
+    const pendingCount = getPendingPattern3SelectedQuestions().length;
+    return hasAskedInterviewerQuestion(question.id)
+      ? pendingCount
+      : Math.max(0, pendingCount - 1);
+  };
+  const getPattern3QuestionBridgeHint = (
+    question: InterviewQuestionSpec,
+    context: "normal" | "loop"
+  ) => {
+    const remainingAfterCurrent = getPattern3RemainingQuestionCountAfterCurrent(question);
+    const isFinalQueuedQuestion = remainingAfterCurrent === 0;
+    const oneMoreHint = isFinalQueuedQuestion
+      ? "Because this is effectively the last queued question, wording like 「最後に一点だけ」 or 「もう一点だけ」 is acceptable if it sounds natural."
+      : "Do not use wording that implies there is only one question left, such as 「もう一点だけ」 or 「あと一点」, because more questions may still follow.";
+    if (context === "loop") {
+      if (question.window === "pattern3_contract") {
+        return `Use a short natural bridge such as 「住まいの点で確認ですが、」, 「住まいの点で一点確認ですが、」, or no bridge after a short acknowledgement. ${oneMoreHint} ${getRecentPattern3QuestionBridgeAvoidanceHint()}`;
+      }
+      if (question.window === "pattern3_timeline") {
+        return `Use a short natural bridge such as 「念のため確認ですが、」, 「確認ですが、」, or no bridge after a short acknowledgement. ${oneMoreHint} ${getRecentPattern3QuestionBridgeAvoidanceHint()}`;
+      }
+      if (question.window === "pattern3_visa") {
+        return `Use a short natural bridge such as 「ちなみに、」, 「確認ですが、」, or no bridge after a short acknowledgement. ${oneMoreHint} ${getRecentPattern3QuestionBridgeAvoidanceHint()}`;
+      }
+      return `Use a short natural bridge such as 「ちなみに、」, 「差し支えなければ、」, 「確認ですが、」, or no bridge after a short acknowledgement. ${oneMoreHint} ${getRecentPattern3QuestionBridgeAvoidanceHint()}`;
+    }
+    if (question.window === "pattern3_contract") {
+      return `Connect it naturally with a bridge like 「住まいの点で一点確認ですが、」, 「住まいの点で確認ですが、」, or by asking directly after a short acknowledgement. ${oneMoreHint} ${getRecentPattern3QuestionBridgeAvoidanceHint()}`;
+    }
+    if (question.window === "pattern3_timeline") {
+      return `Connect it naturally with a bridge like 「念のため、」, 「確認ですが、」, or by asking directly after a short acknowledgement. ${oneMoreHint} ${getRecentPattern3QuestionBridgeAvoidanceHint()}`;
+    }
+    if (question.window === "pattern3_visa") {
+      return `Connect it naturally with a bridge like 「ちなみに、」, 「一点確認ですが、」, or by asking directly after a short acknowledgement. ${oneMoreHint} ${getRecentPattern3QuestionBridgeAvoidanceHint()}`;
+    }
+    if (question.window === "pattern3_documents") {
+      return `Connect it naturally with a bridge like 「流れに沿って一点確認ですが、」, 「ちなみに、」, or by asking directly after a short acknowledgement. ${oneMoreHint} ${getRecentPattern3QuestionBridgeAvoidanceHint()}`;
+    }
+    return `Connect it naturally with a short bridge such as 「一点確認ですが、」, 「ちなみに、」, 「差し支えなければ、」, or by asking directly after a short acknowledgement. ${oneMoreHint} ${getRecentPattern3QuestionBridgeAvoidanceHint()}`;
   };
   const pickWeightedRandom = <T>(items: T[], getWeight: (item: T) => number) => {
     const weightedItems = items
@@ -2012,6 +2163,18 @@ wss.on("connection", (clientSocket) => {
     nextQuestion: InterviewQuestionSpec | null
   ) => {
     if (!nextQuestion) return false;
+    if (
+      interviewerSettings.difficulty === "hard" &&
+      isPattern3ExtraQuestion(nextQuestion) &&
+      getPattern3ExplicitExtraQuestionCount() < 2 &&
+      classification.intent !== "closing" &&
+      classification.intent !== "visa_permission" &&
+      classification.intent !== "contract_permission" &&
+      classification.intent !== "documents_permission" &&
+      classification.intent !== "timeline_permission"
+    ) {
+      return true;
+    }
     if (
       interviewerSettings.difficulty === "easy" &&
       nextQuestion.mandatory &&
@@ -2168,33 +2331,9 @@ wss.on("connection", (clientSocket) => {
     if (phase !== "pattern3") return;
     const normalized = normalizeText(text);
     if (!normalized) return;
-    if (
-      !hasAskedInterviewerQuestion("mandatory_why_free_intro") &&
-      /教育事業|日本語教育|ビジネスマナー教育|受講料|授業料|紹介料/u.test(normalized)
-    ) {
-      askedInterviewerQuestionIds["mandatory_why_free_intro"] = true;
-    }
-    if (
-      !hasAskedInterviewerQuestion("mandatory_start_timing") &&
-      (/ビザ交付後/u.test(normalized) || isStartTimingTopicText(normalized))
-    ) {
-      askedInterviewerQuestionIds["mandatory_start_timing"] = true;
-    }
-    if (
-      !hasAskedInterviewerQuestion("mandatory_housing_support") &&
-      /住居|住まい|不動産会社|本人が自分で探|住居探し|住居のサポート/u.test(normalized)
-    ) {
-      askedInterviewerQuestionIds["mandatory_housing_support"] = true;
-    }
-    if (
-      !hasAskedInterviewerQuestion("mandatory_future_fieldwork") &&
-      (isPattern3CareerPathPrompt(normalized) ||
-        /キャリアアップ|管理業務|現場業務|後輩指導|シフト管理|工程管理|人材管理/u.test(
-          normalized
-        ))
-    ) {
-      askedInterviewerQuestionIds["mandatory_future_fieldwork"] = true;
-    }
+    // Mandatory pattern3 questions must be asked explicitly by the company side.
+    // Do not auto-consume them just because the sales representative touched the topic.
+    void normalized;
   };
   const markInterviewerQuestionsAsked = (text: string) => {
     let matchedQuestion: InterviewQuestionSpec | null = null;
@@ -2759,6 +2898,22 @@ wss.on("connection", (clientSocket) => {
       /雇用契約書/,
       /書式の指定/,
       /合格通知書/
+    ]);
+  };
+  const isPattern3OfferDocumentDecisionPrompt = (text: string) => {
+    const normalized = normalizeText(text);
+    if (!normalized || !isPattern3OfferDocumentPrompt(normalized)) return false;
+    if (hasPattern3SubstantiveExplanationBody(normalized, "contract")) {
+      return false;
+    }
+    return containsAny(normalized, [
+      /いかがでしょうか/,
+      /どちらが良いでしょうか/,
+      /どちらがよろしいでしょうか/,
+      /お送り.*可能/,
+      /お送りさせていただく/,
+      /送ってもよろしい/,
+      /送付.*可能/
     ]);
   };
   const isPattern3LaborConditionFieldRequest = (text: string) => {
@@ -3342,6 +3497,32 @@ wss.on("connection", (clientSocket) => {
         confidence: "high" | "medium" | "low";
       }
     ) => {
+      if (base.intent === "closing") {
+        const explicitSection = detectPattern3SectionFromSalesText(salesText);
+        if (explicitSection && explicitSection !== "closing") {
+          const overriddenIntent: Pattern3TurnIntent =
+            explicitSection === "opening"
+              ? "opening_impression"
+              : explicitSection === "result_followup"
+                ? "result_followup"
+                : explicitSection === "visa"
+                  ? "visa_explanation"
+                  : explicitSection === "contract"
+                    ? "contract_explanation"
+                    : explicitSection === "documents"
+                      ? "documents_explanation"
+                      : explicitSection === "timeline"
+                        ? "timeline_explanation"
+                        : "deadline_request";
+          return {
+            ...base,
+            intent: overriddenIntent,
+            section: explicitSection,
+            shouldAnswerOnly: true,
+            shouldAppendQuestion: false
+          };
+        }
+      }
       if (
         (base.intent === "visa_permission" ||
           base.intent === "contract_permission" ||
@@ -3432,12 +3613,12 @@ wss.on("connection", (clientSocket) => {
     const answeredPattern3Question =
       getSelectedInterviewerQuestionById(pendingPattern3AnsweredQuestionId);
     if (answeredPattern3Question) {
-      const nextMandatoryQuestion = pattern3FinalQuestionLoopActive
-        ? getNextPendingMandatoryPattern3Question(currentSection)
+      const nextLoopQuestion = pattern3FinalQuestionLoopActive
+        ? getNextPendingPattern3LoopQuestion(currentSection)
         : null;
-      if (nextMandatoryQuestion) {
-        markPattern3QuestionIssued(nextMandatoryQuestion);
-        return `The sales representative has just answered your previous company-side question: 「${answeredPattern3Question.prompt}」. First respond with one short acknowledgement sentence in natural business Japanese. Right after that, because there are still required pattern3 questions to cover before closing, proactively ask exactly one more brief company-side question in Japanese very close to: 「${nextMandatoryQuestion.prompt}」. Connect it naturally with a short bridge such as 「一点確認ですが、」 or 「ちなみに、」. Avoid abrupt or redundant transitions like 「それでは、弊社としては」. Do not restate earlier topics. Stop after asking that one question.`;
+      if (nextLoopQuestion) {
+        markPattern3QuestionIssued(nextLoopQuestion);
+        return `The sales representative has just answered your previous company-side question: 「${answeredPattern3Question.prompt}」. First respond with one short acknowledgement sentence in natural business Japanese. Right after that, because there are still selected pattern3 questions to cover before closing, proactively ask exactly one more brief company-side question in Japanese very close to: 「${nextLoopQuestion.prompt}」. ${getPattern3QuestionBridgeHint(nextLoopQuestion, "loop")} Avoid abrupt or redundant transitions like 「それでは、弊社としては」. Do not restate earlier topics. Stop after asking that one question.`;
       }
       pendingPattern3IssuedQuestionId = null;
       pattern3FinalQuestionLoopActive = false;
@@ -3455,27 +3636,48 @@ wss.on("connection", (clientSocket) => {
       pendingPattern3IssuedQuestionId = null;
       return `Respond in natural Japanese as the company side to the sales representative's request to confirm the labor conditions notice details. Answer concretely right now instead of saying you will prepare the information later. Use realistic placeholder values if needed. In one concise reply, include all of these items: company name, representative director name, monthly salary, work location, working hours, salary closing date, and payment date. A natural pattern is: 「ありがとうございます。承知しました。では順にお伝えいたします。まず会社名は〇〇株式会社、代表取締役は□□、給料は月額〇〇万円、勤務地は当社東京事業所、勤務時間は午前8時から午後5時まで、給料の締日は毎月末日、支払日は翌月10日でございます。」 Keep the wording businesslike. Do not ask a new question. Stop after giving the details.`;
     }
+    if (isPattern3OfferDocumentDecisionPrompt(salesText)) {
+      pendingPattern3IssuedQuestionId = null;
+      return `Respond in natural Japanese as the company side to the sales representative's explanation or offer regarding the labor conditions notice / offer-document template. Do not treat this as merely asking permission to continue an explanation. Answer the substance directly. When the sales representative offers to send a template or asks whether sending the template is okay, respond positively and practically in one short businesslike reply, for example by saying that you would like them to send the template. A natural answer is close to: 「ありがとうございます。ぜひ雛形をお送りください。」 or 「ありがとうございます。雛形をお送りいただけますと助かります。」 Do not answer with 「ご説明をお願いします」 in this turn. Do not ask a new company-side question. Stop after your direct answer.`;
+    }
     if (isPattern3FinalQuestionPrompt(salesText)) {
       pattern3FinalQuestionLoopActive = true;
-      const nextMandatoryQuestion = getNextPendingMandatoryPattern3Question(currentSection);
-      if (nextMandatoryQuestion) {
-        markPattern3QuestionIssued(nextMandatoryQuestion);
-        return `Respond in natural Japanese as the company side to the sales representative's invitation for final questions. First react briefly and politely, then ask exactly one brief required company-side question in Japanese very close to: 「${nextMandatoryQuestion.prompt}」. Start that question naturally with a short bridge such as 「一点確認ですが、」. Avoid awkward transitions like 「それでは、弊社としては」. Do not say that you have no questions yet. Do not close the meeting in this turn. Stop after asking that one question.`;
+      const nextLoopQuestion = getNextPendingPattern3LoopQuestion(currentSection);
+      if (nextLoopQuestion) {
+        markPattern3QuestionIssued(nextLoopQuestion);
+        return `Respond in natural Japanese as the company side to the sales representative's invitation for final questions. First react briefly and politely, then ask exactly one brief company-side question in Japanese very close to: 「${nextLoopQuestion.prompt}」. ${getPattern3QuestionBridgeHint(nextLoopQuestion, "loop")} Do not say that you have no questions yet. Do not close the meeting in this turn. Stop after asking that one question.`;
       }
       pendingPattern3IssuedQuestionId = null;
       pattern3FinalQuestionLoopActive = false;
       return "Respond in natural Japanese as the company side to the sales representative's invitation for final questions. Say briefly and politely that you have no further questions at this point, and stop. Do not close the meeting fully in this turn.";
     }
-    const nextQuestion = pickRandomPattern3SelectedInterviewerQuestion(
-      currentSection,
-      classification.intent
-    );
-    const shouldAppendQuestion = shouldAppendRandomPattern3Question(
-      classification,
-      nextQuestion
-    );
+    if (classification.intent === "closing") {
+      const nextLoopQuestion = getNextPendingPattern3LoopQuestion(currentSection);
+      if (nextLoopQuestion) {
+        pattern3FinalQuestionLoopActive = true;
+        markPattern3QuestionIssued(nextLoopQuestion);
+        return `Respond in natural Japanese as the company side to the sales representative's closing cue. Before fully closing, briefly acknowledge the closing cue, then reopen with exactly one brief company-side question in Japanese very close to: 「${nextLoopQuestion.prompt}」. ${getPattern3QuestionBridgeHint(nextLoopQuestion, "loop")} Do not end with 「【面接終了】」 in this turn. Stop after asking that one question.`;
+      }
+    }
+    const forcedHardExtraQuestion =
+      interviewerSettings.difficulty === "hard" &&
+      getPattern3ExplicitExtraQuestionCount() < 2 &&
+      classification.intent !== "opening_impression" &&
+      classification.intent !== "closing" &&
+      classification.intent !== "visa_permission" &&
+      classification.intent !== "contract_permission" &&
+      classification.intent !== "documents_permission" &&
+      classification.intent !== "timeline_permission"
+        ? getNextPendingHardPattern3ExtraQuestion(currentSection)
+        : null;
+    const nextQuestion =
+      forcedHardExtraQuestion ??
+      pickRandomPattern3SelectedInterviewerQuestion(currentSection, classification.intent);
+    const shouldAppendQuestion = forcedHardExtraQuestion
+      ? true
+      : shouldAppendRandomPattern3Question(classification, nextQuestion);
     const nextQuestionLine = shouldAppendQuestion
-      ? `After your short answer, proactively insert exactly one brief company-side reverse question in Japanese, even if the timing is a little forceful. Ask one question close to: 「${nextQuestion!.prompt}」. Connect it naturally with a short bridge such as 「一点確認ですが、」 or 「ちなみに、」, and avoid awkward transitions like 「それでは、弊社としては」. Then stop.`
+      ? `After your short answer, proactively insert exactly one brief company-side reverse question in Japanese, even if the timing is a little forceful. Ask one question close to: 「${nextQuestion!.prompt}」. ${getPattern3QuestionBridgeHint(nextQuestion!, "normal")} Avoid awkward transitions like 「それでは、弊社としては」. Then stop.`
       : "Do not add a new company-side question in this turn. Answer briefly and stop after addressing the sales representative's point.";
     if (shouldAppendQuestion && nextQuestion) {
       markPattern3QuestionIssued(nextQuestion);
@@ -3517,7 +3719,7 @@ wss.on("connection", (clientSocket) => {
       return `${getPattern3DecisionSummary()} Respond in natural Japanese as the company side to the sales representative's opening closing talk. Start with a short thanks. If asked for the overall impression, answer that first. If this session is verbal_offer, say the overall impression was good and naturally mention that ${candidateName} looked especially solid. If this session is pending_review, say the overall impression was generally positive but the final result will be discussed internally and shared later. ${nextQuestionLine}`;
     }
     if (classification.intent === "result_followup" || currentSection === "result_followup") {
-      return `${getPattern3DecisionSummary()} Respond in natural Japanese as the company side to the sales representative's post-impression follow-up. If they ask for a quick result turnaround, answer that point first in a businesslike way. If this session is pending_review, it is natural to say you will review internally and try to respond within a few days. If this session is verbal_offer, it is natural to stay positive and cooperative. ${nextQuestionLine}`;
+      return `${getPattern3DecisionSummary()} Respond in natural Japanese as the company side to the sales representative's post-impression follow-up. If they ask for a quick result turnaround, you must answer that point explicitly first in the same turn before doing anything else. In a pending_review session, say clearly that you will review internally and try to respond within 2〜3 days if possible. In a verbal_offer session, stay positive and cooperative, and still answer the turnaround point explicitly first. Only after that direct answer may you add one brief company-side reverse question if instructed. Do not skip the direct answer and do not jump straight to your own question. ${nextQuestionLine}`;
     }
     if (classification.intent === "visa_explanation" || currentSection === "visa") {
       return `Respond in natural Japanese as the company side to the sales representative's explanation of the 技人国 visa / career path. First acknowledge the explanation and react to whether the company can support gradual career growth. Keep the answer at a general level unless the sales representative explicitly asks for concrete future roles or examples. Do not volunteer detailed concrete examples too early. ${nextQuestionLine}`;
@@ -7035,6 +7237,7 @@ ${salesText}${buildInterviewerNameBlock()}
       pattern3Section = "opening";
       pattern3FinalQuestionLoopActive = false;
       pattern3ExplicitMandatoryQuestionIds = {};
+      pattern3ExplicitExtraQuestionIds = {};
       pendingPattern3AnsweredQuestionId = null;
       pendingPattern3IssuedQuestionId = null;
       pendingSalesReplyQuestionId = null;
@@ -7051,6 +7254,7 @@ ${salesText}${buildInterviewerNameBlock()}
       pattern3Section = "opening";
       pattern3FinalQuestionLoopActive = false;
       pattern3ExplicitMandatoryQuestionIds = {};
+      pattern3ExplicitExtraQuestionIds = {};
       pendingPattern3StudentExit = false;
       pendingPattern3ExitApprovalReply = false;
       pendingPattern3AnsweredQuestionId = null;
@@ -7092,6 +7296,7 @@ ${salesText}${buildInterviewerNameBlock()}
       introPhase = "complete";
       pattern3FinalQuestionLoopActive = false;
       pattern3ExplicitMandatoryQuestionIds = {};
+      pattern3ExplicitExtraQuestionIds = {};
       pendingPattern3StudentExit = false;
       pendingPattern3ExitApprovalReply = false;
       pendingPattern3AnsweredQuestionId = null;
@@ -8697,6 +8902,7 @@ When the sales rep clearly gives the final closing thanks, end politely with "�
       initializeSelectedInterviewerQuestions();
       pattern3FinalQuestionLoopActive = false;
       pattern3ExplicitMandatoryQuestionIds = {};
+      pattern3ExplicitExtraQuestionIds = {};
       emitCandidateProfile();
       if (SALES_LED_FLOW) {
         if (scenarioMode === "pattern2") {
@@ -8707,8 +8913,9 @@ When the sales rep clearly gives the final closing thanks, end politely with "�
           phase = "pattern1";
         }
         pattern3Section = "opening";
-      pattern3FinalQuestionLoopActive = false;
-      if (phase === "pattern2") {
+        pattern3FinalQuestionLoopActive = false;
+        pattern3ExplicitExtraQuestionIds = {};
+        if (phase === "pattern2") {
           introPhase = "sales_intro";
         } else if (phase === "pattern3") {
           introPhase = "complete";
@@ -8731,6 +8938,7 @@ When the sales rep clearly gives the final closing thanks, end politely with "�
         phase = "pattern2";
         pattern3Section = "opening";
         pattern3FinalQuestionLoopActive = false;
+        pattern3ExplicitExtraQuestionIds = {};
         introPhase = "complete";
         companyGreetingPromptPending = false;
         companyIntroAckPromptPending = false;
