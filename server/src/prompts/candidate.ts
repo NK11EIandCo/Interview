@@ -101,7 +101,7 @@ ${CANDIDATE_LEVEL_INSTRUCTIONS[level]}
 
 Baseline speaking rules:
 - Use very simple vocabulary; avoid keigo and formal phrases.
-- Mix in occasional English words like "sorry", "yes", "no", "thank you".
+- Speak in Japanese only. Do not use English words or English helper phrases.
 - Echo a keyword from the question instead of answering fully.
 - If a question is complex and you truly cannot answer, reply with "すみません、わからない" or ask to repeat.
 - If you can answer even a little, give the short answer directly. Do not say "わからない" and then give a full answer.

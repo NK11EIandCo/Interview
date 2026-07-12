@@ -18,6 +18,7 @@ type TranscriptItem = {
   text: string;
   status: "streaming" | "final";
   id: string;
+  phase: "pattern1" | "pattern2" | "pattern3";
 };
 
 type TranscriptDelta = {
@@ -88,6 +89,20 @@ const getWsUrl = () => {
   return `${protocol}://${host}/ws`;
 };
 
+const getApiUrl = (pathname: string) => {
+  const protocol = window.location.protocol;
+  const portOverride = import.meta.env.VITE_API_PORT ?? import.meta.env.VITE_WS_PORT;
+  const isLocalhost =
+    window.location.hostname === "localhost" ||
+    window.location.hostname === "127.0.0.1";
+  const port = portOverride ?? (isLocalhost ? "3000" : "");
+  const host = port
+    ? `${window.location.hostname}:${Number.parseInt(port, 10)}`
+    : window.location.host;
+  const normalizedPath = pathname.startsWith("/") ? pathname : `/${pathname}`;
+  return `${protocol}//${host}${normalizedPath}`;
+};
+
 const SYSTEM_TRANSCRIPT_NAME = "__system__";
 const USER_TRANSCRIPT_TIMEOUT_MS = 8000;
 
@@ -147,10 +162,58 @@ const getCandidateLanguageLevelLabel = (level: CandidateLanguageLevel | string) 
 };
 
 type SystemNotice = {
-  kind: "no_speech" | "relay_target_unclear";
+  kind: "no_speech" | "relay_target_unclear" | "mic_error";
   title: string;
   detail: string;
   guidance: string;
+};
+
+type EvaluationCategoryKey =
+  | "facilitation"
+  | "closing"
+  | "knowledge"
+  | "communication";
+
+type EvaluationCategoryResult = {
+  score: number | null;
+  label: string;
+  summary: string;
+  evidence: string[];
+};
+
+type EvaluationNgFinding = {
+  phrase: string;
+  reason: string;
+  category: EvaluationCategoryKey;
+  phase: "pattern1" | "pattern2" | "pattern3" | "unknown";
+};
+
+type InterviewEvaluationResult = {
+  overallScore: number | null;
+  overallLabel: string;
+  overallComment: string;
+  categories: Record<EvaluationCategoryKey, EvaluationCategoryResult>;
+  goodPoints: string[];
+  improvementPoints: string[];
+  conversationIssues: string[];
+  ngFindings: EvaluationNgFinding[];
+};
+
+type SessionEvaluationContext = {
+  scenarioMode: "unified" | "pattern1" | "pattern2" | "pattern3";
+  candidateLevel: CandidateLanguageLevel;
+  industry: InterviewIndustry;
+  interviewerDifficulty: InterviewDifficulty;
+  interviewerLiteracy: InterviewerLiteracy;
+  interviewerPersonality: InterviewerPersonality;
+  interviewerDialect: InterviewerDialect;
+};
+
+const EVALUATION_CATEGORY_LABELS: Record<EvaluationCategoryKey, string> = {
+  facilitation: "進行管理",
+  closing: "クロージング",
+  knowledge: "知識正確性",
+  communication: "態度・伝わり方"
 };
 
 export const App = () => {
@@ -291,6 +354,19 @@ export const App = () => {
   const [textInputDraft, setTextInputDraft] = useState("");
   const [sessionStarted, setSessionStarted] = useState(false);
   const [sessionEnded, setSessionEnded] = useState(false);
+  const [completedPracticePhases, setCompletedPracticePhases] = useState<
+    Record<"pattern1" | "pattern2" | "pattern3", boolean>
+  >({
+    pattern1: false,
+    pattern2: false,
+    pattern3: false
+  });
+  const [sessionEvaluationContext, setSessionEvaluationContext] =
+    useState<SessionEvaluationContext | null>(null);
+  const [evaluationLoading, setEvaluationLoading] = useState(false);
+  const [evaluationError, setEvaluationError] = useState<string | null>(null);
+  const [evaluationResult, setEvaluationResult] =
+    useState<InterviewEvaluationResult | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const recordingRef = useRef(false);
@@ -342,6 +418,26 @@ export const App = () => {
       guidance: "もう一度 Start Mic を押して、短く区切って話してください。"
     });
   };
+  const showMicErrorNotice = (error?: unknown) => {
+    const message =
+      error instanceof Error && error.message.trim()
+        ? error.message.trim()
+        : "マイクの初期化に失敗しました。";
+    const insecureContext =
+      !window.isSecureContext &&
+      window.location.hostname !== "localhost" &&
+      window.location.hostname !== "127.0.0.1";
+    setSystemNotice({
+      kind: "mic_error",
+      title: "マイクを開始できませんでした。",
+      detail: insecureContext
+        ? "このページは安全な接続ではないため、ブラウザがマイク利用を許可していません。"
+        : message,
+      guidance: insecureContext
+        ? "HTTPS または localhost で開き直して、もう一度お試しください。"
+        : "ブラウザのマイク権限を確認してから、もう一度 Start Mic を押してください。"
+    });
+  };
   const showRelayTargetUnclearNotice = (noticePhase?: "pattern1" | "pattern2" | "pattern3") => {
     if (noticePhase === "pattern3") {
       setSystemNotice({
@@ -373,6 +469,15 @@ export const App = () => {
     setCandidateProfile(null);
     setSessionStarted(false);
     setSessionEnded(false);
+    setCompletedPracticePhases({
+      pattern1: false,
+      pattern2: false,
+      pattern3: false
+    });
+    setSessionEvaluationContext(null);
+    setEvaluationLoading(false);
+    setEvaluationError(null);
+    setEvaluationResult(null);
     activeAiTurnKeysRef.current.clear();
     activeTranscriptRef.current = {};
     pendingTranscriptQueueRef.current = {};
@@ -482,7 +587,8 @@ export const App = () => {
         source,
         name: finalName,
         text: finalText,
-        status: "final"
+        status: "final",
+        phase: phaseRef.current
       };
       setTranscripts((prev) => [...prev, finalItem]);
     }
@@ -508,10 +614,25 @@ export const App = () => {
     }
   };
   const startSession = () => {
+    const nextSessionContext: SessionEvaluationContext = {
+      scenarioMode,
+      candidateLevel: candidateLanguageLevel,
+      industry,
+      interviewerDifficulty,
+      interviewerLiteracy,
+      interviewerPersonality,
+      interviewerDialect
+    };
     clearSystemNotice();
     resetConversationState();
+    setSessionEvaluationContext(nextSessionContext);
     setSessionStarted(true);
     setSessionEnded(false);
+    setCompletedPracticePhases({
+      pattern1: false,
+      pattern2: false,
+      pattern3: false
+    });
     setManualAdvanceReady(false);
     sendMessage({
       type: "start",
@@ -531,6 +652,7 @@ export const App = () => {
     wsStatus === WS_STATUS.open &&
     sessionsReady &&
     !sessionEnded &&
+    !completedPracticePhases[phase] &&
     !recording &&
     !awaitingUserTranscript &&
     !awaitingAiResponse &&
@@ -541,16 +663,38 @@ export const App = () => {
     wsStatus === WS_STATUS.open &&
     sessionsReady &&
     !sessionEnded &&
+    !completedPracticePhases[phase] &&
     !recording &&
     !awaitingUserTranscript &&
     !awaitingAiResponse &&
     activeAiStreamingCount === 0 &&
     textInputDraft.trim().length > 0;
   const canExportConversationPdf = transcripts.length > 0;
+  const canRequestEvaluation =
+    sessionEvaluationContext !== null &&
+    (completedPracticePhases[phase] || sessionEnded) &&
+    transcripts.some(
+      (item) =>
+        item.source === "user" &&
+        item.status === "final" &&
+        item.phase === phase &&
+        item.text.trim()
+    ) &&
+    !recording &&
+    !awaitingUserTranscript &&
+    !awaitingAiResponse &&
+    activeAiStreamingCount === 0 &&
+    !evaluationLoading;
+
+  const getEvaluationScoreText = (score: number | null) =>
+    score === null ? "未評価" : `${score.toFixed(1)} / 5`;
 
   const startRecording = async () => {
     if (recordingRef.current) return;
     try {
+      if (!navigator.mediaDevices?.getUserMedia) {
+        throw new Error("このブラウザではマイク入力を利用できません。");
+      }
       clearSystemNotice();
       setInterruptPending(false);
       interruptPendingRef.current = false;
@@ -558,7 +702,6 @@ export const App = () => {
       interruptStopRequestedRef.current = false;
       detectedSpeechFramesRef.current = 0;
       speechDetectedRef.current = false;
-      sendMessage({ type: "user_speaking" });
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           channelCount: 1,
@@ -569,6 +712,9 @@ export const App = () => {
         }
       });
       const audioContext = new AudioContext({ sampleRate: 24000 });
+      if (audioContext.state === "suspended") {
+        await audioContext.resume();
+      }
       const source = audioContext.createMediaStreamSource(stream);
       const processor = audioContext.createScriptProcessor(4096, 1, 1);
       const zeroGain = audioContext.createGain();
@@ -620,10 +766,12 @@ export const App = () => {
       mediaStreamRef.current = stream;
 
       recordingRef.current = true;
+      sendMessage({ type: "user_speaking" });
       setRecording(true);
       appendLog("Mic streaming on.");
     } catch (error) {
       appendLog(`Mic error: ${(error as Error).message}`);
+      showMicErrorNotice(error);
     }
   };
 
@@ -708,6 +856,77 @@ export const App = () => {
     window.print();
   };
 
+  const requestInterviewEvaluation = async () => {
+    if (!canRequestEvaluation || !sessionEvaluationContext) return;
+    setEvaluationLoading(true);
+    setEvaluationError(null);
+    setEvaluationResult(null);
+    try {
+      const requestPayload = {
+        scenarioMode: phase,
+        candidateLevel: sessionEvaluationContext.candidateLevel,
+        industry: sessionEvaluationContext.industry,
+        interviewerDifficulty: sessionEvaluationContext.interviewerDifficulty,
+        interviewerLiteracy: sessionEvaluationContext.interviewerLiteracy,
+        interviewerPersonality: sessionEvaluationContext.interviewerPersonality,
+        interviewerDialect: sessionEvaluationContext.interviewerDialect,
+        transcripts: transcripts
+          .filter(
+            (item) =>
+              item.status === "final" &&
+              item.phase === phase &&
+              item.text.trim()
+          )
+          .map((item) => ({
+            source: item.source,
+            name: item.name,
+            text: item.text,
+            phase: item.phase
+          }))
+      };
+      let response: Response | null = null;
+      let data: InterviewEvaluationResult | { message?: string } | null = null;
+      let lastError: Error | null = null;
+      for (let attempt = 1; attempt <= 2; attempt += 1) {
+        try {
+          response = await fetch(getApiUrl("/api/evaluate"), {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify(requestPayload)
+          });
+          const contentType = response.headers.get("content-type") ?? "";
+          data = contentType.includes("application/json")
+            ? ((await response.json()) as InterviewEvaluationResult | { message?: string })
+            : { message: await response.text() };
+          if (response.ok) {
+            break;
+          }
+          lastError = new Error(
+            typeof data === "object" && data && "message" in data && data.message
+              ? String(data.message)
+              : "面接評価の生成に失敗しました。"
+          );
+        } catch (error) {
+          lastError = error as Error;
+        }
+        if (attempt < 2) {
+          await new Promise((resolve) => window.setTimeout(resolve, 250));
+        }
+      }
+      if (!response || !response.ok || !data) {
+        throw lastError ?? new Error("面接評価の生成に失敗しました。");
+      }
+      setEvaluationResult(data as InterviewEvaluationResult);
+    } catch (error) {
+      setEvaluationError((error as Error).message);
+      setEvaluationResult(null);
+    } finally {
+      setEvaluationLoading(false);
+    }
+  };
+
   useEffect(() => {
     awaitingUserTranscriptRef.current = awaitingUserTranscript;
   }, [awaitingUserTranscript]);
@@ -720,13 +939,17 @@ export const App = () => {
     phaseRef.current = phase;
   }, [phase]);
 
-  const appendSystemTranscript = (text: string) => {
+  const appendSystemTranscript = (
+    text: string,
+    itemPhase: "pattern1" | "pattern2" | "pattern3" = phaseRef.current
+  ) => {
     const nextItem: TranscriptItem = {
       id: `${Date.now()}-system-${transcriptCounterRef.current++}`,
       source: "system",
       name: SYSTEM_TRANSCRIPT_NAME,
       text,
-      status: "final"
+      status: "final",
+      phase: itemPhase
     };
     setTranscripts((prev) => [...prev, nextItem]);
   };
@@ -745,17 +968,30 @@ export const App = () => {
         ? "営業 + 学生AI + 面接官AI"
         : "営業 + 面接官AI";
 
-  const playAudioChunk = (
-    base64: string,
-    speaker: TranscriptDelta["source"],
-    turnId: number
-  ) => {
+  const ensurePlaybackContext = async () => {
     if (!playbackContextRef.current) {
       playbackContextRef.current = new AudioContext({ sampleRate: 24000 });
       nextPlaybackTimeRef.current = playbackContextRef.current.currentTime;
     }
-
     const ctx = playbackContextRef.current;
+    // Browser audio can remain suspended even after AI audio arrives.
+    // Keep this explicit resume; removing it can make transcripts appear while playback stays silent.
+    if (ctx.state === "suspended") {
+      await ctx.resume();
+      nextPlaybackTimeRef.current = Math.max(
+        nextPlaybackTimeRef.current,
+        ctx.currentTime
+      );
+    }
+    return ctx;
+  };
+
+  const playAudioChunk = async (
+    base64: string,
+    speaker: TranscriptDelta["source"],
+    turnId: number
+  ) => {
+    const ctx = await ensurePlaybackContext();
     const int16 = decodeBase64ToInt16(base64);
     const float32 = new Float32Array(int16.length);
     for (let i = 0; i < int16.length; i += 1) {
@@ -804,7 +1040,8 @@ export const App = () => {
             source: nextDelta.source,
             name: nextDelta.name,
             text: nextDelta.delta,
-            status: "streaming"
+            status: "streaming",
+            phase: phaseRef.current
           };
           return [
             ...prev,
@@ -858,7 +1095,8 @@ export const App = () => {
           source,
           name,
           text,
-          status: "final"
+          status: "final",
+          phase: phaseRef.current
         };
         markAiStreamingDone(turnKey);
         return [...prev, finalItem];
@@ -959,6 +1197,10 @@ export const App = () => {
       if (payload.type === "session_ended") {
         clearSystemNotice();
         setSessionEnded(true);
+        setCompletedPracticePhases((prev) => ({
+          ...prev,
+          [phaseRef.current]: true
+        }));
         setAwaitingAiResponse(false);
         appendLog(
           payload.reason === "max_turns"
@@ -990,9 +1232,25 @@ export const App = () => {
           (previousPhase !== nextPhase || payload.reason === "start")
         ) {
           appendSystemTranscript(
-            `${getPhaseLabel(nextPhase)}（${getPhaseActors(nextPhase)}）`
+            `${getPhaseLabel(nextPhase)}（${getPhaseActors(nextPhase)}）`,
+            nextPhase
           );
         }
+      }
+
+      if (payload.type === "phase_practice_complete") {
+        const completedPhase =
+          payload.phase === "pattern3"
+            ? "pattern3"
+            : payload.phase === "pattern2"
+              ? "pattern2"
+              : "pattern1";
+        setCompletedPracticePhases((prev) => ({
+          ...prev,
+          [completedPhase]: true
+        }));
+        setAwaitingAiResponse(false);
+        appendLog(`Practice completed for ${completedPhase}.`);
       }
 
       if (payload.type === "human_turn_ready") {
@@ -1002,7 +1260,7 @@ export const App = () => {
       }
 
       if (payload.type === "audio") {
-        playAudioChunk(
+        void playAudioChunk(
           payload.data,
           payload.source,
           Number(payload.turnId ?? 0)
@@ -1044,7 +1302,8 @@ export const App = () => {
             source: payload.source === "ai_b" ? "ai_b" : "ai_a",
             name: String(payload.name ?? "Speaker"),
             text: "",
-            status: "streaming"
+            status: "streaming",
+            phase: phaseRef.current
           };
           setTranscripts((prev) => [
             ...prev,
@@ -1187,7 +1446,8 @@ export const App = () => {
           source: "user",
           name: "You",
           text: transcriptText,
-          status: "final"
+          status: "final",
+          phase: phaseRef.current
         };
         setTranscripts((prev) => [...prev, nextItem]);
       }
@@ -1707,6 +1967,16 @@ export const App = () => {
             >
               PDF出力
             </button>
+            <button
+              className="secondary export-action"
+              disabled={!canRequestEvaluation}
+              onClick={() => {
+                void requestInterviewEvaluation();
+              }}
+              type="button"
+            >
+              {evaluationLoading ? "評価生成中..." : "面接評価"}
+            </button>
             <div className="mode-toggle" role="group" aria-label="Input mode">
               <button
                 className={!textInputEnabled ? "secondary active" : "ghost"}
@@ -1794,7 +2064,12 @@ export const App = () => {
                     submitTextInput();
                   }
                 }}
-                disabled={!sessionsReady || sessionEnded || recording}
+                disabled={
+                  !sessionsReady ||
+                  sessionEnded ||
+                  completedPracticePhases[phase] ||
+                  recording
+                }
               />
               <button onClick={submitTextInput} disabled={!canSubmitText}>
                 テキスト送信
@@ -1873,6 +2148,113 @@ export const App = () => {
           </button>
         </div>
       </section>
+
+      {(evaluationLoading || evaluationError || evaluationResult) && (
+        <section className="panel evaluation-panel">
+          <div className="conversation-header">
+            <div className="evaluation-heading">
+              <h2>面接評価</h2>
+              <p>営業発話を主対象に、会話全体との噛み合いも見て採点します。</p>
+            </div>
+            {evaluationResult && (
+              <div className="evaluation-score-pill">
+                総合 {getEvaluationScoreText(evaluationResult.overallScore)}
+              </div>
+            )}
+          </div>
+
+          {evaluationLoading && (
+            <div className="evaluation-loading-card" role="status" aria-live="polite">
+              <div className="evaluation-spinner" aria-hidden="true" />
+              <div className="evaluation-loading-copy">
+                <strong>評価を生成しています</strong>
+                <p className="evaluation-summary">
+                  会話ログをもとに採点中です。結果が出るまでお待ちください。
+                </p>
+              </div>
+            </div>
+          )}
+
+          {evaluationError && (
+            <p className="evaluation-error">{evaluationError}</p>
+          )}
+
+          {evaluationResult && (
+            <>
+              <div className="evaluation-overview">
+                <strong>{evaluationResult.overallLabel}</strong>
+                <p>{evaluationResult.overallComment}</p>
+              </div>
+
+              <div className="evaluation-grid">
+                {(Object.keys(EVALUATION_CATEGORY_LABELS) as EvaluationCategoryKey[])
+                  .filter((key) => evaluationResult.categories[key].score !== null)
+                  .map((key) => {
+                    const category = evaluationResult.categories[key];
+                    return (
+                      <article className="evaluation-card" key={key}>
+                        <span>{EVALUATION_CATEGORY_LABELS[key]}</span>
+                        <strong>{getEvaluationScoreText(category.score)}</strong>
+                        <p>{category.summary}</p>
+                        {category.evidence.length > 0 && (
+                          <ul className="evaluation-evidence-list">
+                            {category.evidence.map((item) => (
+                              <li key={item}>{item}</li>
+                            ))}
+                          </ul>
+                        )}
+                      </article>
+                    );
+                  })}
+              </div>
+
+              <div className="evaluation-columns">
+                <div className="evaluation-block">
+                  <h3>良かった点</h3>
+                  <ul>
+                    {evaluationResult.goodPoints.map((item) => (
+                      <li key={item}>{item}</li>
+                    ))}
+                  </ul>
+                </div>
+
+                <div className="evaluation-block">
+                  <h3>改善点</h3>
+                  <ul>
+                    {evaluationResult.improvementPoints.map((item) => (
+                      <li key={item}>{item}</li>
+                    ))}
+                  </ul>
+                </div>
+              </div>
+
+              {evaluationResult.conversationIssues.length > 0 && (
+                <div className="evaluation-block">
+                  <h3>会話上の違和感</h3>
+                  <ul>
+                    {evaluationResult.conversationIssues.map((item) => (
+                      <li key={item}>{item}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {evaluationResult.ngFindings.length > 0 && (
+                <div className="evaluation-block evaluation-block-danger">
+                  <h3>NG表現・危険説明</h3>
+                  <ul>
+                    {evaluationResult.ngFindings.map((item, index) => (
+                      <li key={`${item.phrase}-${index}`}>
+                        {item.reason}：{item.phrase}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </>
+          )}
+        </section>
+      )}
     </div>
   );
 };

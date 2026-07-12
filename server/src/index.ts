@@ -48,6 +48,8 @@ const OPENAI_TRANSCRIPTION_MODEL =
   process.env.OPENAI_TRANSCRIPTION_MODEL ?? "gpt-4o-mini-transcribe";
 const OPENAI_LONGFORM_TRANSCRIPTION_MODEL =
   process.env.OPENAI_LONGFORM_TRANSCRIPTION_MODEL ?? "gpt-4o-transcribe";
+const OPENAI_EVALUATION_MODEL =
+  process.env.OPENAI_EVALUATION_MODEL ?? OPENAI_ROUTING_MODEL;
 const OPENAI_CANDIDATE_PLANNER_MODEL =
   process.env.OPENAI_CANDIDATE_PLANNER_MODEL ?? OPENAI_ROUTING_MODEL;
 const OPENAI_INTERVIEWER_PLANNER_MODEL =
@@ -70,6 +72,1018 @@ const ENABLE_CANDIDATE_RESPONSE_VALIDATION = false;
 const ENABLE_CANDIDATE_TURN_PLANNING = true;
 const ENABLE_INTERVIEWER_TURN_PLANNING = true;
 const PREFER_DEDICATED_TRANSCRIPTION_INPUT = false;
+
+type EvaluationPhase = "pattern1" | "pattern2" | "pattern3";
+type EvaluationScenarioMode = "unified" | "pattern1" | "pattern2" | "pattern3";
+type EvaluationTranscriptSource = "ai_a" | "ai_b" | "user" | "system";
+type EvaluationCategoryKey =
+  | "facilitation"
+  | "closing"
+  | "knowledge"
+  | "communication";
+type EvaluationTranscriptItem = {
+  source: EvaluationTranscriptSource;
+  name: string;
+  text: string;
+  phase: EvaluationPhase;
+};
+type EvaluationCategoryResult = {
+  score: number | null;
+  label: string;
+  summary: string;
+  evidence: string[];
+};
+type EvaluationNgFinding = {
+  phrase: string;
+  reason: string;
+  category: EvaluationCategoryKey;
+  phase: EvaluationPhase | "unknown";
+};
+type EvaluationResponseBody = {
+  overallScore: number | null;
+  overallLabel: string;
+  overallComment: string;
+  categories: Record<EvaluationCategoryKey, EvaluationCategoryResult>;
+  goodPoints: string[];
+  improvementPoints: string[];
+  conversationIssues: string[];
+  ngFindings: EvaluationNgFinding[];
+};
+
+const EVALUATION_PHASES: EvaluationPhase[] = [
+  "pattern1",
+  "pattern2",
+  "pattern3"
+];
+const EVALUATION_SCENARIO_MODES: EvaluationScenarioMode[] = [
+  "unified",
+  "pattern1",
+  "pattern2",
+  "pattern3"
+];
+const EVALUATION_SOURCES: EvaluationTranscriptSource[] = [
+  "ai_a",
+  "ai_b",
+  "user",
+  "system"
+];
+const EVALUATION_CATEGORY_LABELS: Record<EvaluationCategoryKey, string> = {
+  facilitation: "進行管理",
+  closing: "クロージング",
+  knowledge: "知識正確性",
+  communication: "態度・伝わり方"
+};
+const EVALUATION_NG_PATTERNS: Array<{
+  pattern: RegExp;
+  reason: string;
+  category: EvaluationCategoryKey;
+  onlyIndustry?: InterviewIndustry;
+}> = [
+  {
+    pattern: /外人/,
+    reason: "差別的・不適切な表現です。",
+    category: "communication"
+  },
+  {
+    pattern: /現場仕事だけでも.*バレなきゃ大丈夫/,
+    reason: "法的に危険な説明です。",
+    category: "knowledge"
+  },
+  {
+    pattern: /最低賃金以下.*問題ない/,
+    reason: "法的に危険な説明です。",
+    category: "knowledge"
+  },
+  {
+    pattern: /ビザだけ取らせて/,
+    reason: "法的に危険な説明です。",
+    category: "knowledge"
+  },
+  {
+    pattern: /学生から手数料.*いただいて/,
+    reason: "ビジネスモデルの説明が誤っています。",
+    category: "knowledge"
+  },
+  {
+    pattern: /やらない業務も記載/,
+    reason: "採用理由書に関する危険な虚偽説明です。",
+    category: "knowledge"
+  },
+  {
+    pattern: /単純作業だけでも大丈夫/,
+    reason: "技人国ビザの説明として法的に誤りです。",
+    category: "knowledge"
+  },
+  {
+    pattern: /全ての現場に入れます/,
+    reason: "建築業では誤解を招く危険な断定です。",
+    category: "knowledge",
+    onlyIndustry: "construction"
+  },
+  {
+    pattern: /日本語を教えている学校/,
+    reason: "会社説明として不適切です。",
+    category: "knowledge"
+  },
+  {
+    pattern: /ビザの申請は私(?:たち|ども)?が行います/,
+    reason: "実務体制の説明として不正確です。",
+    category: "knowledge"
+  },
+  {
+    pattern: /問題なく日本語がペラペラ/,
+    reason: "日本語力の断定が不適切です。",
+    category: "communication"
+  },
+  {
+    pattern: /外国人の方はやめない/,
+    reason: "離職リスクを断定しており不適切です。",
+    category: "communication"
+  }
+];
+
+const isEvaluationPhase = (value: unknown): value is EvaluationPhase =>
+  typeof value === "string" &&
+  EVALUATION_PHASES.includes(value as EvaluationPhase);
+const isEvaluationScenarioMode = (
+  value: unknown
+): value is EvaluationScenarioMode =>
+  typeof value === "string" &&
+  EVALUATION_SCENARIO_MODES.includes(value as EvaluationScenarioMode);
+const isEvaluationTranscriptSource = (
+  value: unknown
+): value is EvaluationTranscriptSource =>
+  typeof value === "string" &&
+  EVALUATION_SOURCES.includes(value as EvaluationTranscriptSource);
+const normalizeEvaluationText = (text: string) =>
+  text.replace(/\s+/g, "").trim();
+const clipEvaluationText = (text: string, max = 90) =>
+  text.length <= max ? text : `${text.slice(0, max)}…`;
+const scoreToEvaluationLabel = (score: number | null) => {
+  if (score === null) return "N/A";
+  if (score >= 4.5) return "Perfect";
+  if (score >= 3.5) return "Good";
+  if (score >= 2.5) return "Pass";
+  if (score >= 1.5) return "Fail";
+  return "Bad / NG";
+};
+const coerceEvaluationScore = (value: unknown): number | null => {
+  if (value === null || value === undefined) return null;
+  const numeric =
+    typeof value === "number"
+      ? value
+      : typeof value === "string"
+        ? Number.parseFloat(value)
+        : Number.NaN;
+  if (!Number.isFinite(numeric)) return null;
+  return Math.max(1, Math.min(5, Math.round(numeric)));
+};
+const dedupeStrings = (items: string[], limit: number) =>
+  [...new Set(items.map((item) => item.trim()).filter(Boolean))].slice(0, limit);
+const toEvaluationSpeakerLabel = (item: EvaluationTranscriptItem) => {
+  if (item.source === "user") return "営業";
+  if (item.source === "ai_b") return "学生";
+  if (item.phase === "pattern3") return "企業";
+  if (item.phase === "pattern2") return "面接官";
+  return "学生";
+};
+const buildEvaluationTranscriptLines = (items: EvaluationTranscriptItem[]) =>
+  items
+    .filter((item) => item.source !== "system" && item.text.trim())
+    .map(
+      (item, index) =>
+        `[L${index + 1}][${item.phase}][${toEvaluationSpeakerLabel(item)}] ${item.text.trim()}`
+    );
+const buildEvaluationSalesLineReferences = (items: EvaluationTranscriptItem[]) =>
+  items
+    .filter((item) => item.source !== "system" && item.text.trim())
+    .flatMap((item, index) =>
+      item.source === "user"
+        ? [
+            {
+              line: `L${index + 1}`,
+              phase: item.phase,
+              text: item.text.trim()
+            }
+          ]
+        : []
+    );
+const detectEvaluationNgFindings = (
+  items: EvaluationTranscriptItem[],
+  industry: InterviewIndustry
+): EvaluationNgFinding[] => {
+  const findings: EvaluationNgFinding[] = [];
+  for (const item of items) {
+    if (item.source !== "user") continue;
+    for (const spec of EVALUATION_NG_PATTERNS) {
+      if (spec.onlyIndustry && spec.onlyIndustry !== industry) continue;
+      if (!spec.pattern.test(item.text)) continue;
+      findings.push({
+        phrase: clipEvaluationText(item.text.trim()),
+        reason: spec.reason,
+        category: spec.category,
+        phase: item.phase
+      });
+    }
+  }
+  return findings;
+};
+const buildEvaluationSignals = (
+  items: EvaluationTranscriptItem[],
+  industry: InterviewIndustry
+) => {
+  const getNextMeaningfulItem = (startIndex: number) => {
+    for (let index = startIndex + 1; index < items.length; index += 1) {
+      const candidate = items[index];
+      if (candidate.source === "system" || !candidate.text.trim()) continue;
+      return { item: candidate, index };
+    }
+    return null;
+  };
+  const salesTurns = items.filter(
+    (item) => item.source === "user" && item.text.trim()
+  );
+  const salesTexts = salesTurns.map((item) => item.text);
+  const salesNormalized = salesTexts.map(normalizeEvaluationText);
+  const pattern3SalesTexts = salesTurns
+    .filter((item) => item.phase === "pattern3")
+    .map((item) => item.text);
+  const pattern3Normalized = pattern3SalesTexts.map(normalizeEvaluationText);
+  const pattern1SalesTexts = salesTurns
+    .filter((item) => item.phase === "pattern1")
+    .map((item) => item.text);
+  const pattern1Normalized = pattern1SalesTexts.map(normalizeEvaluationText);
+  const pattern2Items = items.filter(
+    (item) =>
+      item.phase === "pattern2" &&
+      item.source !== "system" &&
+      item.text.trim()
+  );
+  const pattern2SalesTexts = salesTurns
+    .filter((item) => item.phase === "pattern2")
+    .map((item) => item.text);
+  const pattern2Normalized = pattern2SalesTexts.map(normalizeEvaluationText);
+  const pattern3Items = items.filter(
+    (item) =>
+      item.phase === "pattern3" &&
+      item.source !== "system" &&
+      item.text.trim()
+  );
+  const phasesPresent = [...new Set(items.map((item) => item.phase))].filter(
+    isEvaluationPhase
+  );
+  let currentNonSalesStreak = 0;
+  let maxNonSalesStreak = 0;
+  for (const item of items) {
+    if (item.source === "system") continue;
+    if (item.source === "user") {
+      currentNonSalesStreak = 0;
+      continue;
+    }
+    currentNonSalesStreak += 1;
+    maxNonSalesStreak = Math.max(maxNonSalesStreak, currentNonSalesStreak);
+  }
+  let pattern2ImmediateSupplement = false;
+  let pattern2RelayedQuestionCount = 0;
+  let pattern2DirectQuestionCount = 0;
+  let pattern2VisaQuestionCount = 0;
+  let pattern2ExitedBeforeVisaExplanation = false;
+  for (let index = 0; index < items.length; index += 1) {
+    const item = items[index];
+    if (item.phase !== "pattern2" || item.source === "system" || !item.text.trim()) {
+      continue;
+    }
+    if (item.source === "ai_b") {
+      const next = getNextMeaningfulItem(index);
+      if (
+        next &&
+        next.item.phase === "pattern2" &&
+        next.item.source === "user" &&
+        next.item.text.trim().length >= 18
+      ) {
+        pattern2ImmediateSupplement = true;
+      }
+    }
+    if (item.source !== "ai_a") continue;
+    const next = getNextMeaningfulItem(index);
+    if (!next || next.item.phase !== "pattern2") continue;
+    if (
+      /ビザ|許可率|技人国|特定技能|入管/u.test(item.text)
+    ) {
+      pattern2VisaQuestionCount += 1;
+      if (
+        next.item.source === "user" &&
+        /退出|生徒.*前|学生.*前|不安に感じ|後でご説明|この後にご説明/u.test(
+          next.item.text
+        )
+      ) {
+        pattern2ExitedBeforeVisaExplanation = true;
+      }
+    }
+    if (next.item.source === "user") {
+      const afterRelay = getNextMeaningfulItem(next.index);
+      if (
+        afterRelay &&
+        afterRelay.item.phase === "pattern2" &&
+        afterRelay.item.source === "ai_b"
+      ) {
+        pattern2RelayedQuestionCount += 1;
+      }
+      continue;
+    }
+    if (next.item.source === "ai_b") {
+      pattern2DirectQuestionCount += 1;
+    }
+  }
+  const pattern3CompanyTexts = pattern3Items
+    .filter((item) => item.source === "ai_a")
+    .map((item) => item.text);
+  const pattern3CompanyNormalized = pattern3CompanyTexts.map(normalizeEvaluationText);
+  const pattern3PendingReview = pattern3CompanyNormalized.some((text) =>
+    /社内で検討|改めてご連絡|結果に関しては.*ご連絡|検討します/u.test(text)
+  );
+  const pattern3PositiveImpression = pattern3CompanyNormalized.some((text) =>
+    /印象.*良かった|非常に良い印象|特に.*印象が良かった/u.test(text)
+  );
+  return {
+    phasesPresent,
+    salesTurnCount: salesTurns.length,
+    maxNonSalesStreak,
+    pattern1: {
+      practicedAttendance: pattern1Normalized.some((text) =>
+        /返事|名前を呼ばれたら|ジョンさん|大きな声/u.test(text)
+      ),
+      practicedReaction: pattern1Normalized.some((text) =>
+        /リアクション|うなず|うんうん|反応/u.test(text)
+      ),
+      practicedWorkIntent: pattern1Normalized.some((text) =>
+        /日本でずっと働きたい/u.test(text)
+      ),
+      practicedEffortAnswer: pattern1Normalized.some((text) =>
+        /お仕事が大変でも大丈夫ですか|大丈夫です|頑張ります/u.test(text)
+      ),
+      coachedCompanyQuestions: pattern1Normalized.some((text) =>
+        /会社へ質問|聞きたいこと|外国人の先輩|入社前に勉強/u.test(text)
+      ),
+      discouragedConditionQuestions: pattern1Normalized.some((text) =>
+        /条件面|給料|給与|ビザ/.test(text) && /質問.*控|聞かない|避け/u.test(text)
+      ),
+      suggestedConditionQuestions: pattern1Normalized.some((text) =>
+        /(給料|給与|ビザ|残業|休日|寮|家賃)/u.test(text) &&
+        /質問|聞き/u.test(text)
+      ),
+      allowedTimeLimitedCommitment: pattern1Normalized.some((text) =>
+        /10年働きたい|数年.*働きたい|何年.*働きたい/u.test(text)
+      ),
+      usedAdvancedBusinessTerms: pattern1SalesTexts.some((text) =>
+        /理念|PDCA|コンプライアンス|KPI|ガバナンス|アサイン/u.test(text)
+      )
+    },
+    pattern2: {
+      requestedSelfIntroduction: pattern2Normalized.some((text) =>
+        /自己紹介.*お願いします|自己紹介から|ひとりずつ自己紹介/u.test(text)
+      ),
+      gaveImmediateSupplement: pattern2ImmediateSupplement,
+      explainedBusinessModel: pattern2Normalized.some(
+        (text) =>
+          /紹介料/.test(text) &&
+          /(教育事業|受講料|授業料|日本語教育|ビジネスマナー教育)/.test(text)
+      ),
+      requestedCompanyOverview: pattern2Normalized.some((text) =>
+        /1日のお仕事の流れ|会社様の雰囲気|お伝えをいただいてもよろしいでしょうか|皆さんにお伝え/u.test(
+          text
+        )
+      ),
+      checkedHardWorkCommitment: pattern2Normalized.some((text) =>
+        /大変な時もあります|大変な時でも大丈夫|頑張れますか/u.test(text)
+      ),
+      relayedInterviewerQuestions: pattern2RelayedQuestionCount > 0,
+      relayedInterviewerQuestionCount: pattern2RelayedQuestionCount,
+      directInterviewerQuestionCount: pattern2DirectQuestionCount,
+      promptedStudentExit: pattern2Normalized.some((text) =>
+        /退出いただき|退出してください|退出していただき/u.test(text)
+      ),
+      handledVisaQuestionAfterExit:
+        pattern2VisaQuestionCount === 0 || pattern2ExitedBeforeVisaExplanation,
+      visaQuestionCount: pattern2VisaQuestionCount,
+      usedAdvancedBusinessTerms: pattern2SalesTexts.some((text) =>
+        /理念|PDCA|コンプライアンス|KPI|ガバナンス|アサイン/u.test(text)
+      )
+    },
+    pattern3: {
+      pendingReview: pattern3PendingReview,
+      positiveImpression: pattern3PositiveImpression,
+      askedImpression: pattern3Normalized.some((text) =>
+        /印象|感想|どうでした|いかがでした/.test(text)
+      ),
+      acknowledgedCandidatePraise: pattern3Normalized.some((text) =>
+        /落ち着いて受け答え|理解が早く|相性良さそう|印象が良かったですね|しっかりして/u.test(
+          text
+        )
+      ),
+      mentionedContractFlow: pattern3Normalized.some((text) =>
+        /内定通知書|労働条件通知書|雇用契約書|雛形/.test(text)
+      ),
+      offeredTemplate: pattern3Normalized.some((text) =>
+        /雛形|お送りさせていただく|お送りしておきましょう/u.test(text)
+      ),
+      explainedCannotNotifyBeforeOfferLetter: pattern3Normalized.some((text) =>
+        /お送りいただくまで.*伝えできません|内定通知書.*まで.*伝えできません|本人に合格したことはお伝えできません/u.test(
+          text
+        )
+      ),
+      mentionedDeadline: pattern3Normalized.some((text) =>
+        /本日中|明日中|2〜?3日以内|2-?3日以内|期限|いつまで|返送いただくことは可能/.test(
+          text
+        )
+      ),
+      askedTwoToThreeDayDeadline: pattern3Normalized.some((text) =>
+        /2〜?3日以内|2-?3日以内/.test(text)
+      ),
+      askedSameOrNextDayDeadline: pattern3Normalized.some((text) =>
+        /本日中|明日中/.test(text)
+      ),
+      explainedBusinessModel: pattern3Normalized.some(
+        (text) =>
+          /紹介料/.test(text) &&
+          /(受講料|授業料|教育事業|日本語教育|ビジネスマナー教育)/.test(text)
+      ),
+      explainedGijinkoku: pattern3Normalized.some(
+        (text) =>
+          /技人国/.test(text) &&
+          /(管理業務|キャリアアップ|単純作業|現場作業だけ)/.test(text)
+      ),
+      askedCareerPathForReasonLetter: pattern3Normalized.some((text) =>
+        /採用理由書|キャリアアップの可能性|将来どのようなキャリアアップ/u.test(
+          text
+        )
+      ),
+      mentionedRequiredDocs: pattern3Normalized.some((text) =>
+        /履歴事項全部証明書|登記簿謄本|法定調書合計表|決算報告書|会社概要|パンフレット|外観写真|事務所内写真|雇用保険適用事業所番号/u.test(
+          text
+        )
+      ),
+      mentionedVisaTimeline: pattern3Normalized.some((text) =>
+        /1.?2ヶ月|3.?4ヶ月|5.?6ヶ月|1.?3か月|3.?6か月|審査期間/u.test(text)
+      ),
+      mentionedApprovalRate: pattern3Normalized.some((text) =>
+        /70.?80%|70〜80%|許可率/u.test(text)
+      )
+    },
+    ngFindings: detectEvaluationNgFindings(items, industry)
+  };
+};
+const buildEvaluationScope = (
+  items: EvaluationTranscriptItem[],
+  scenarioMode: EvaluationScenarioMode,
+  signals: ReturnType<typeof buildEvaluationSignals>
+) => {
+  const salesNormalized = items
+    .filter((item) => item.source === "user")
+    .map((item) => normalizeEvaluationText(item.text));
+  const hasPattern1 = signals.phasesPresent.includes("pattern1");
+  const hasPattern2 = signals.phasesPresent.includes("pattern2");
+  const hasPattern3 = signals.phasesPresent.includes("pattern3");
+  const pattern1Only = hasPattern1 && !hasPattern2 && !hasPattern3;
+  const pattern2Only = hasPattern2 && !hasPattern1 && !hasPattern3;
+  const pattern3Only = hasPattern3 && !hasPattern1 && !hasPattern2;
+  const hasKnowledgeTopic = salesNormalized.some((text) =>
+    /技人国|特定技能|管理業務|管理費|紹介料|受講料|授業料|ビザ|採用理由書|内定通知書|労働条件通知書|雇用契約書|必要書類/u.test(
+      text
+    )
+  );
+  const hasClosingTopic =
+    hasPattern3 ||
+    salesNormalized.some((text) =>
+      /印象|感想|結果|2〜?3日以内|2-?3日以内|本日中|明日中|返送|期限|いつまで/u.test(
+        text
+      )
+    );
+  const applicableCategories = new Set<EvaluationCategoryKey>(["communication"]);
+  if (hasPattern1 || hasPattern2) {
+    applicableCategories.add("facilitation");
+  }
+  if (hasClosingTopic) {
+    applicableCategories.add("closing");
+  }
+  if (hasKnowledgeTopic) {
+    applicableCategories.add("knowledge");
+  }
+  const nonApplicableCategories = (
+    Object.keys(EVALUATION_CATEGORY_LABELS) as EvaluationCategoryKey[]
+  ).filter((key) => !applicableCategories.has(key));
+  const forbiddenRegexes: RegExp[] = [];
+  if (!hasPattern3) {
+    forbiddenRegexes.push(
+      /ビザ|技人国|特定技能|クロージング|面接後フロー|期日設定|期日|期限|本日中|明日中|内定通知書|労働条件通知書|必要書類|採用理由書|雇用契約書|結果.?連絡/u
+    );
+  }
+  if (pattern1Only) {
+    forbiddenRegexes.push(
+      /学生からの質問.*回答|質問に対する具体的な回答|会社質問.*回答|知識正確性|制度説明/u
+    );
+  }
+  if (pattern2Only) {
+    forbiddenRegexes.push(
+      /返事練習|リアクション練習|10年働きたい|日本でずっと働きたい|会社へ質問する内容を考える/u
+    );
+  }
+  if (pattern3Only) {
+    forbiddenRegexes.push(
+      /出席確認|リアクション練習|自己紹介直後の補足|企業から学生への質問の中継|やさしい日本語化が不足/u
+    );
+  }
+  const promptNotes: string[] = [];
+  if (pattern1Only) {
+    promptNotes.push(
+      "pattern1 only です。評価対象は返事練習、リアクション練習、定型回答練習、学生が会社へ聞く質問の練習に限ってください。"
+    );
+    promptNotes.push(
+      "pattern1 only では、『事前指導』『主導権の維持』『やさしい日本語』『学生に条件面の質問を控えるよう伝えたか』を明示的に見てください。"
+    );
+    promptNotes.push(
+      "pattern1 の『会社へ質問する内容を考える』練習では、営業担当がその質問自体に会社として詳しく回答しなくても減点しないでください。目的は質問内容のコーチングです。"
+    );
+    promptNotes.push(
+      "pattern1 only では、ビザ説明、面接後フロー、期日設定、必要書類、条件通知書、学生質問への会社回答不足を改善点に挙げてはいけません。"
+    );
+  }
+  if (pattern2Only) {
+    promptNotes.push(
+      "pattern2 only です。評価対象は、営業が面接進行の主導権を維持できているか、学生へのやさしい日本語化、自己紹介直後の補足、企業への仕事内容説明依頼、企業質問の中継、学生退出の進行に限ってください。"
+    );
+    promptNotes.push(
+      "pattern2 only では、part1 の返事練習・リアクション練習・『日本でずっと働きたい』練習や、part3 のクロージング・期日設定・必要書類案内を不足として指摘してはいけません。"
+    );
+    promptNotes.push(
+      "企業が学生へ直接質問した場面では、営業が間に入ってやさしい日本語に言い換えたかを重視してください。学生の日本語レベルが高い場合でも、営業が長く蚊帳の外になる状態は高評価にしないでください。"
+    );
+    promptNotes.push(
+      "企業からビザに関する質問が出た場合は、学生を退出させてから説明に移る判断ができたかだけを見てください。今回 transcript にビザ話題がなければ、その点を不足として書いてはいけません。"
+    );
+    promptNotes.push(
+      "マニュアル通りに成立している定型発話に対して、『もっと具体的に』『もっと詳しく』といった上積み提案だけで改善点を作ってはいけません。改善点は、必須観点の欠落・逸脱・誤進行がある場合に限ってください。"
+    );
+  }
+  if (pattern3Only) {
+    promptNotes.push(
+      "pattern3 only です。評価対象は、面接後の印象ヒアリング、結果連絡や内定通知書の進め方、期日設定、技人国説明、採用理由書・必要書類・審査期間などの説明に限ってください。"
+    );
+    promptNotes.push(
+      "口頭内定が出ていない流れなら『2〜3日以内の結果連絡』と『内定通知書（労働条件通知書）雛形の先出し』を重視してください。口頭内定が出ている流れなら『候補者への軽い肯定フォロー』と『本日中/明日中の返送期日設定』を重視してください。"
+    );
+    promptNotes.push(
+      "part3 では、今回 transcript に出ていない branch を不足として書いてはいけません。たとえば口頭内定が出ていない会話に対して、本日中返送を求めていないことを減点してはいけません。"
+    );
+    promptNotes.push(
+      "改善点は、マニュアルで明示されている項目だけを扱ってください。主観的な営業トーク改善や独自ノウハウを追加してはいけません。"
+    );
+  }
+  if (!hasPattern3) {
+    promptNotes.push(
+      "pattern3 が会話に存在しないため、クロージング未実施や期日設定不足を『不足』として書いてはいけません。"
+    );
+  }
+  return {
+    hasPattern1,
+    hasPattern2,
+    hasPattern3,
+    pattern1Only,
+    pattern2Only,
+    pattern3Only,
+    applicableCategories: [...applicableCategories],
+    nonApplicableCategories,
+    forbiddenRegexes,
+    promptNotes,
+    fallbackOverallComment: pattern1Only
+      ? "事前練習の範囲では、進行と伝わり方を中心に評価しました。"
+      : "営業発話を中心に、今回実施した練習範囲に限って評価しました。"
+  };
+};
+const filterEvaluationListByScope = (
+  items: string[],
+  scope: ReturnType<typeof buildEvaluationScope>,
+  limit: number
+) =>
+  dedupeStrings(
+    items.filter(
+      (item) =>
+        item &&
+        !scope.forbiddenRegexes.some((pattern) => pattern.test(item))
+    ),
+    limit
+  );
+const isActionableImprovementPoint = (text: string) =>
+  /^L\d+[：:]/u.test(text) ||
+  /^L\d+「.*」[：:]/u.test(text) ||
+  /^L\d+\s/u.test(text);
+const buildFallbackImprovementPoints = (
+  items: EvaluationTranscriptItem[],
+  scope: ReturnType<typeof buildEvaluationScope>
+) => {
+  const salesLines = buildEvaluationSalesLineReferences(items);
+  const fallback: string[] = [];
+
+  const exampleQuestionLine = salesLines.find((line) =>
+    /いいですね.*外国人の先輩はいますか/u.test(line.text)
+  );
+  if (exampleQuestionLine) {
+    fallback.push(
+      `${exampleQuestionLine.line}「${clipEvaluationText(
+        exampleQuestionLine.text,
+        36
+      )}」: 良い質問例を追加する意図は伝わりますが、学生が次に言うべき答えと混ざりやすいです。「いいですね。ほかには『外国人の先輩はいますか？』という聞き方もできます。」のように、例示だと分かる形にするとより自然です。`
+    );
+  }
+
+  const longExplanationLine = salesLines.find(
+    (line) => line.text.length >= 45 && line.phase === "pattern1"
+  );
+  if (longExplanationLine) {
+    fallback.push(
+      `${longExplanationLine.line}「${clipEvaluationText(
+        longExplanationLine.text,
+        36
+      )}」: 説明がやや長いので、要点を短く区切ってから練習に入ると学生が反復しやすくなります。先に「次はリアクション練習です。」のように結論を一言置く形が有効です。`
+    );
+  }
+
+  const transitionLine = salesLines.find((line) =>
+    /面接官が入室するので.*面接を始めましょう/u.test(line.text)
+  );
+  if (transitionLine && scope.pattern1Only) {
+    fallback.push(
+      `${transitionLine.line}「${clipEvaluationText(
+        transitionLine.text,
+        36
+      )}」: 練習の締めとしては自然ですが、「ここまでの返事と質問をそのまま使いましょう。」を一言足すと、学生が本番で何を再現すべきかがより明確になります。`
+    );
+  }
+
+  if (scope.pattern1Only) {
+    const earliestPattern1Line = salesLines.find((line) => line.phase === "pattern1");
+    if (earliestPattern1Line) {
+      fallback.push(
+        `${earliestPattern1Line.line}「${clipEvaluationText(
+          earliestPattern1Line.text,
+          36
+        )}」: 事前指導として「日本で長く働きたいと答えましょう」「給料やビザなど条件面の質問は先に出さないようにしましょう」を最初に一言入れると、練習の基準がより明確になります。`
+      );
+    }
+  }
+
+  return filterEvaluationListByScope(fallback, scope, 3);
+};
+const buildPattern1ManualImprovementPoints = (
+  items: EvaluationTranscriptItem[],
+  signals: ReturnType<typeof buildEvaluationSignals>,
+  scope: ReturnType<typeof buildEvaluationScope>
+) => {
+  if (!scope.pattern1Only) return [] as string[];
+
+  const salesLines = buildEvaluationSalesLineReferences(items).filter(
+    (line) => line.phase === "pattern1"
+  );
+  if (!salesLines.length) return [] as string[];
+
+  const firstLine = salesLines[0];
+  const reactionLine =
+    salesLines.find((line) => /リアクション|うなず|うんうん|反応/u.test(line.text)) ??
+    firstLine;
+  const workIntentLine =
+    salesLines.find((line) => /日本でずっと働きたい|どれくらい働きたい/u.test(line.text)) ??
+    firstLine;
+  const effortLine =
+    salesLines.find((line) => /大丈夫です|頑張ります|大変でも/u.test(line.text)) ??
+    salesLines.find((line) => /質問練習/u.test(line.text)) ??
+    workIntentLine;
+  const questionLine =
+    salesLines.find((line) => /質問がありますか|聞きたいこと|質問しましょう/u.test(line.text)) ??
+    salesLines[salesLines.length - 1] ??
+    firstLine;
+
+  const improvements: string[] = [];
+
+  if (!/手をあげ|手を上げ/u.test(firstLine.text)) {
+    improvements.push(
+      `${firstLine.line}「${clipEvaluationText(
+        firstLine.text,
+        36
+      )}」: 出席確認では、返事だけでなく「手を上げて返事してください」まで明示すると、練習の意図がより伝わります。企業が本人を見つけやすくなる理由も一言添えると、より実践的です。`
+    );
+  }
+
+  if (signals.pattern1.practicedReaction && !/印象|アピール|不安|理解している/u.test(reactionLine.text)) {
+    improvements.push(
+      `${reactionLine.line}「${clipEvaluationText(
+        reactionLine.text,
+        36
+      )}」: リアクション練習はできていますが、「相槌があると日本語を理解している印象になる」「無反応だと企業が不安になる」まで添えると、指導の意図がより伝わりやすくなります。`
+    );
+  }
+
+  if (signals.pattern1.practicedWorkIntent && !/10年|ずっと働きたい.*答えましょう/u.test(workIntentLine.text)) {
+    improvements.push(
+      `${workIntentLine.line}「${clipEvaluationText(
+        workIntentLine.text,
+        36
+      )}」: 「日本でずっと働きたいです」の練習はできていますが、「10年働きたい」は避けることも合わせて伝えると、回答の意図までより明確に教えられます。`
+    );
+  }
+
+  if (!signals.pattern1.practicedEffortAnswer) {
+    improvements.push(
+      `${effortLine.line}「${clipEvaluationText(
+        effortLine.text,
+        36
+      )}」: 「お仕事が大変でも大丈夫ですか」「大丈夫です！頑張ります！」の練習が入っていないため、ここも反復練習として加えると、本番で返答しやすくなります。`
+    );
+  }
+
+  if (
+    signals.pattern1.coachedCompanyQuestions &&
+    !/外国人の先輩|将来リーダー|入社前に勉強|仕事の時に大切/u.test(questionLine.text)
+  ) {
+    improvements.push(
+      `${questionLine.line}「${clipEvaluationText(
+        questionLine.text,
+        36
+      )}」: 質問練習では、良い質問例をもう少し具体的に示すと学生が再現しやすくなります。「外国人の先輩はいますか」「入社前に勉強することはありますか」などを明示すると効果的です。`
+    );
+  }
+
+  if (!signals.pattern1.discouragedConditionQuestions) {
+    improvements.push(
+      `${questionLine.line}「${clipEvaluationText(
+        questionLine.text,
+        36
+      )}」: 「給料・ビザ・引っ越し補助など条件面の質問はしない」と明確に伝えることが重要です。避けるべき質問例まで口頭で示すと、学生が注意点を理解しやすくなります。`
+    );
+  }
+
+  return filterEvaluationListByScope(improvements, scope, 5);
+};
+const buildPattern2ManualImprovementPoints = (
+  items: EvaluationTranscriptItem[],
+  signals: ReturnType<typeof buildEvaluationSignals>,
+  scope: ReturnType<typeof buildEvaluationScope>
+) => {
+  if (!scope.pattern2Only) return [] as string[];
+
+  const salesLines = buildEvaluationSalesLineReferences(items).filter(
+    (line) => line.phase === "pattern2"
+  );
+  if (!salesLines.length) return [] as string[];
+
+  const firstLine = salesLines[0];
+  const selfIntroLine =
+    salesLines.find((line) => /自己紹介/u.test(line.text)) ?? firstLine;
+  const companyOverviewLine =
+    salesLines.find(
+      (line) => /1日のお仕事の流れ|会社様の雰囲気|お伝えをいただいて/u.test(line.text)
+    ) ?? selfIntroLine;
+  const hardWorkLine =
+    salesLines.find((line) => /大変な時もあります|頑張れますか/u.test(line.text)) ??
+    companyOverviewLine;
+  const exitLine =
+    salesLines.find((line) => /退出/u.test(line.text)) ??
+    salesLines[salesLines.length - 1] ??
+    firstLine;
+  const advancedTermsLine = salesLines.find((line) =>
+    /理念|PDCA|コンプライアンス|KPI|ガバナンス|アサイン/u.test(line.text)
+  );
+  const improvements: string[] = [];
+
+  if (
+    signals.pattern2.requestedSelfIntroduction &&
+    !signals.pattern2.gaveImmediateSupplement
+  ) {
+    improvements.push(
+      `${selfIntroLine.line}「${clipEvaluationText(
+        selfIntroLine.text,
+        36
+      )}」: 学生の自己紹介後に営業からの補足説明がすぐ入っていないため、主導権が企業側へ移りやすくなります。自己紹介直後に、担当目線の強みと本人の意欲を短く補足してから次へつなぐ形にすると進行が安定します。`
+    );
+  }
+
+  if (!signals.pattern2.requestedCompanyOverview) {
+    improvements.push(
+      `${companyOverviewLine.line}「${clipEvaluationText(
+        companyOverviewLine.text,
+        36
+      )}」: 企業説明へのつなぎがやや弱くなっています。事前に仕事内容・給料・勤務地・勤務時間は共有済みであることを伝えたうえで、「1日のお仕事の流れや会社の雰囲気を皆さんへお話しいただけますか」と依頼すると、流れがより自然にまとまります。`
+    );
+  }
+
+  if (!signals.pattern2.checkedHardWorkCommitment) {
+    improvements.push(
+      `${hardWorkLine.line}「${clipEvaluationText(
+        hardWorkLine.text,
+        36
+      )}」: 企業説明後の「大変な時でも大丈夫ですか」「頑張れますか」という確認が入っていません。学生の意思をその場で確認してから企業へ返すと、安心感と進行の主導権を両立できます。`
+    );
+  }
+
+  if (signals.pattern2.directInterviewerQuestionCount > 0) {
+    improvements.push(
+      `${companyOverviewLine.line}「${clipEvaluationText(
+        companyOverviewLine.text,
+        36
+      )}」: 企業と学生の直接やり取りが発生しています。企業からの質問には営業が間に入り、学生が理解しやすい短い日本語に言い換えてから回答を促すと、進行がより安定します。`
+    );
+  }
+
+  if (
+    signals.pattern2.visaQuestionCount > 0 &&
+    !signals.pattern2.handledVisaQuestionAfterExit
+  ) {
+    improvements.push(
+      `${exitLine.line}「${clipEvaluationText(
+        exitLine.text,
+        36
+      )}」: ビザに関する質問が学生の前で出た場合は、その場で回答せず、まず学生に退出いただいてから説明へ移る必要があります。「生徒の前だと不安に感じてしまうので、この後ご説明してもよろしいでしょうか」と切り分ける言い方が適切です。`
+    );
+  }
+
+  if (advancedTermsLine) {
+    improvements.push(
+      `${advancedTermsLine.line}「${clipEvaluationText(
+        advancedTermsLine.text,
+        36
+      )}」: 学生に向ける場面で難しい用語が入ると理解しづらくなります。企業の質問を中継するときは、短くやさしい日本語に置き換えてから伝えると、通訳としての役割がより明確になります。`
+    );
+  }
+
+  if (!signals.pattern2.promptedStudentExit) {
+    improvements.push(
+      `${exitLine.line}「${clipEvaluationText(
+        exitLine.text,
+        36
+      )}」: 面接の締めでは、学生に退出いただいたうえで企業とのヒアリングへ移る案内があると流れが明確になります。「それでは生徒さんには退出いただき、この後少しヒアリングのお時間をいただいてもよろしいでしょうか」とつなぐ形が自然です。`
+    );
+  }
+
+  return filterEvaluationListByScope(improvements, scope, 5);
+};
+const buildPattern3ManualImprovementPoints = (
+  items: EvaluationTranscriptItem[],
+  signals: ReturnType<typeof buildEvaluationSignals>,
+  scope: ReturnType<typeof buildEvaluationScope>
+) => {
+  if (!scope.pattern3Only) return [] as string[];
+
+  const salesLines = buildEvaluationSalesLineReferences(items).filter(
+    (line) => line.phase === "pattern3"
+  );
+  if (!salesLines.length) return [] as string[];
+
+  const firstLine = salesLines[0];
+  const impressionLine =
+    salesLines.find((line) => /印象|感想|いかがでした/u.test(line.text)) ?? firstLine;
+  const contractLine =
+    salesLines.find((line) => /内定通知書|労働条件通知書|雛形|雇用契約書/u.test(line.text)) ??
+    impressionLine;
+  const gijinkokuLine =
+    salesLines.find((line) => /技人国|管理業務|キャリアアップ|単純作業/u.test(line.text)) ??
+    contractLine;
+  const docsLine =
+    salesLines.find(
+      (line) =>
+        /履歴事項全部証明書|登記簿謄本|法定調書|決算報告書|外観写真|雇用保険適用事業所番号/u.test(
+          line.text
+        )
+    ) ?? gijinkokuLine;
+  const deadlineLine =
+    salesLines.find((line) => /2〜?3日以内|2-?3日以内|本日中|明日中|返送/u.test(line.text)) ??
+    contractLine;
+  const noticeLine =
+    salesLines.find((line) => /本人に合格したことはお伝えできません|伝えできません/u.test(line.text)) ??
+    contractLine;
+  const timelineLine =
+    salesLines.find((line) => /ヶ月|か月|審査期間|70.?80%|許可率/u.test(line.text)) ??
+    docsLine;
+
+  const improvements: string[] = [];
+
+  if (!signals.pattern3.askedImpression) {
+    improvements.push(
+      `${impressionLine.line}「${clipEvaluationText(
+        impressionLine.text,
+        36
+      )}」: 面接後ヒアリングの冒頭では、まず企業全体の印象を確認したい場面です。「本日ご面接いただいた皆さまの全体的な印象はいかがでしたでしょうか」と先に聞くと、温度感を自然に把握しやすくなります。`
+    );
+  }
+
+  if (signals.pattern3.pendingReview && !signals.pattern3.askedTwoToThreeDayDeadline) {
+    improvements.push(
+      `${deadlineLine.line}「${clipEvaluationText(
+        deadlineLine.text,
+        36
+      )}」: 口頭内定が出ていない流れでは、「2〜3日以内に結果のご連絡をいただくことは可能でしょうか」と具体的に期限を切ることが重要です。「なるべく早く」だけだと、次の動きが曖昧になりやすくなります。`
+    );
+  }
+
+  if (signals.pattern3.pendingReview && !signals.pattern3.offeredTemplate) {
+    improvements.push(
+      `${contractLine.line}「${clipEvaluationText(
+        contractLine.text,
+        36
+      )}」: 口頭内定が出ていない場合でも、内定通知書（労働条件通知書）の雛形は先に送る運用が必要です。「弊社に雛形がございますので、お送りさせていただくことも可能ですがいかがでしょうか」と一言入れると、回収遅れを防ぎやすくなります。`
+    );
+  }
+
+  if (signals.pattern3.positiveImpression && !signals.pattern3.acknowledgedCandidatePraise) {
+    improvements.push(
+      `${impressionLine.line}「${clipEvaluationText(
+        impressionLine.text,
+        36
+      )}」: 企業が良い印象を示した場面では、挙がった候補者を営業側が軽く肯定して後押しできると、クロージングがより自然になります。「〇〇さんは落ち着いて受け答えされていましたね」のように短く言語化すると伝わりやすいです。`
+    );
+  }
+
+  if (signals.pattern3.positiveImpression && !signals.pattern3.askedSameOrNextDayDeadline) {
+    improvements.push(
+      `${deadlineLine.line}「${clipEvaluationText(
+        deadlineLine.text,
+        36
+      )}」: 口頭内定が出ている流れでは、「本日中に返送いただくことは可能でしょうか」「午後面接なら明日中でお願いできますか」と、営業側から具体日程を切ることが大切です。「いつ頃まで」だけだと、回収時期がぼやけやすくなります。`
+    );
+  }
+
+  if (!signals.pattern3.explainedGijinkoku) {
+    improvements.push(
+      `${gijinkokuLine.line}「${clipEvaluationText(
+        gijinkokuLine.text,
+        36
+      )}」: 技人国ビザの説明では、「単純作業や現場作業だけは不可」「将来的に管理業務のキャリアパスが必要」という要点を明確に伝える必要があります。管理業務の具体例まで添えると、制度説明として十分になります。`
+    );
+  } else if (!signals.pattern3.askedCareerPathForReasonLetter) {
+    improvements.push(
+      `${gijinkokuLine.line}「${clipEvaluationText(
+        gijinkokuLine.text,
+        36
+      )}」: 技人国の説明後は、採用理由書の作成に向けて「御社で将来どのようなキャリアアップの可能性があるか」を確認できると、その後の書類準備へつなげやすくなります。`
+    );
+  }
+
+  if (!signals.pattern3.explainedCannotNotifyBeforeOfferLetter) {
+    improvements.push(
+      `${noticeLine.line}「${clipEvaluationText(
+        noticeLine.text,
+        36
+      )}」: 内定通知書（労働条件通知書）を受領するまでは、本人に合格と伝えられない点を明示する必要があります。「書面をいただくまでは本人へ合格をお伝えできません」とはっきり伝えると、回収の優先度が上がります。`
+    );
+  }
+
+  if (!signals.pattern3.mentionedRequiredDocs) {
+    improvements.push(
+      `${docsLine.line}「${clipEvaluationText(
+        docsLine.text,
+        36
+      )}」: 必要書類の案内が不足しています。少なくとも、登記簿謄本、法定調書合計表、決算報告書、会社概要、雇用契約書、写真類、雇用保険適用事業所番号などを案内できると、説明がより十分になります。`
+    );
+  }
+
+  if (!signals.pattern3.mentionedVisaTimeline || !signals.pattern3.mentionedApprovalRate) {
+    improvements.push(
+      `${timelineLine.line}「${clipEvaluationText(
+        timelineLine.text,
+        36
+      )}」: 申請後の見通しとして、審査期間と許可率の案内があるとより十分です。国内外でのおおよその期間と、「許可率は70〜80%程度で100%ではない」点まで伝えると、リスク説明として適切です。`
+    );
+  }
+
+  return filterEvaluationListByScope(improvements, scope, 5);
+};
+const buildDefaultEvaluationCategories = (): Record<
+  EvaluationCategoryKey,
+  EvaluationCategoryResult
+> => ({
+  facilitation: {
+    score: null,
+    label: "N/A",
+    summary: "該当する発話が不足しているため未評価です。",
+    evidence: []
+  },
+  closing: {
+    score: null,
+    label: "N/A",
+    summary: "該当する発話が不足しているため未評価です。",
+    evidence: []
+  },
+  knowledge: {
+    score: null,
+    label: "N/A",
+    summary: "該当する発話が不足しているため未評価です。",
+    evidence: []
+  },
+  communication: {
+    score: null,
+    label: "N/A",
+    summary: "該当する発話が不足しているため未評価です。",
+    evidence: []
+  }
+});
 
 if (!OPENAI_API_KEY) {
   console.error("Error: OPENAI_API_KEY is not set.");
@@ -113,13 +1127,34 @@ interface RealtimeHandlers {
 const buildSessionUpdate = (profile: AiProfile): RealtimeSessionUpdate => ({
   type: "session.update",
   session: {
-    modalities: ["text", "audio"],
+    type: "realtime",
     instructions: profile.instructions,
-    voice: profile.voice,
-    input_audio_format: "pcm16",
-    output_audio_format: "pcm16",
-    input_audio_transcription: { model: "whisper-1" },
-    turn_detection: null
+    // Realtime GA shape. Do not move these fields back to the old beta layout:
+    // session.voice / mixed ["text","audio"] output_modalities caused session.update
+    // failures, which left sessionsReady false and disabled Start Mic.
+    audio: {
+      input: {
+        format: {
+          type: "audio/pcm",
+          rate: 24000
+        },
+        noise_reduction: {
+          type: "near_field"
+        },
+        transcription: {
+          model: OPENAI_TRANSCRIPTION_MODEL
+        },
+        turn_detection: null
+      },
+      output: {
+        voice: profile.voice,
+        format: {
+          type: "audio/pcm",
+          rate: 24000
+        }
+      }
+    },
+    output_modalities: ["audio"]
   }
 });
 
@@ -129,8 +1164,7 @@ const createRealtimeConnection = (
 ) => {
   const ws = new WebSocket(OPENAI_REALTIME_URL, {
     headers: {
-      Authorization: `Bearer ${OPENAI_API_KEY}`,
-      "OpenAI-Beta": "realtime=v1"
+      Authorization: `Bearer ${OPENAI_API_KEY}`
     }
   });
 
@@ -151,29 +1185,45 @@ const createRealtimeConnection = (
     }
 
     if (
+      event.type === "session.created" ||
       event.type === "session.updated" ||
+      event.type === "transcription_session.created" ||
       event.type === "transcription_session.updated"
     ) {
       handlers.onReady();
       return;
     }
 
-    if (event.type === "response.audio.delta") {
+    // Realtime GA uses response.output_audio* / response.output_audio_transcript*.
+    // Keep both GA and older aliases here; narrowing this broke AI speech playback/text.
+    if (
+      event.type === "response.audio.delta" ||
+      event.type === "response.output_audio.delta"
+    ) {
       handlers.onAudioDelta(String(event.delta ?? ""));
       return;
     }
 
-    if (event.type === "response.audio.done") {
+    if (
+      event.type === "response.audio.done" ||
+      event.type === "response.output_audio.done"
+    ) {
       handlers.onAudioDone();
       return;
     }
 
-    if (event.type === "response.audio_transcript.delta") {
+    if (
+      event.type === "response.audio_transcript.delta" ||
+      event.type === "response.output_audio_transcript.delta"
+    ) {
       handlers.onTranscriptDelta(String(event.delta ?? ""));
       return;
     }
 
-    if (event.type === "response.audio_transcript.done") {
+    if (
+      event.type === "response.audio_transcript.done" ||
+      event.type === "response.output_audio_transcript.done"
+    ) {
       handlers.onTranscriptDone(String(event.transcript ?? ""));
       return;
     }
@@ -184,6 +1234,8 @@ const createRealtimeConnection = (
           ? event.transcript
           : typeof event.text === "string"
             ? event.text
+            : typeof event.delta === "string"
+              ? event.delta
             : "";
       if (event.type.includes("delta") && transcript) {
         console.log("[OpenAI] Input transcript delta:", transcript);
@@ -215,10 +1267,556 @@ const app = express();
 const server = createServer(app);
 const wss = new WebSocketServer({ server, path: "/ws" });
 
+app.use(express.json({ limit: "2mb" }));
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (
+    origin &&
+    /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/u.test(origin)
+  ) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+    res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  }
+  if (req.method === "OPTIONS") {
+    res.status(204).end();
+    return;
+  }
+  next();
+});
+
 const clientRoot = path.resolve(__dirname, "..", "..", "frontend", "dist");
 app.use(express.static(clientRoot));
 app.get("/health", (_req, res) => {
   res.json({ ok: true });
+});
+
+app.post("/api/evaluate", async (req, res) => {
+  const body = req.body as {
+    scenarioMode?: unknown;
+    candidateLevel?: unknown;
+    industry?: unknown;
+    interviewerDifficulty?: unknown;
+    interviewerLiteracy?: unknown;
+    interviewerPersonality?: unknown;
+    interviewerDialect?: unknown;
+    transcripts?: unknown;
+  };
+
+  const scenarioMode = isEvaluationScenarioMode(body.scenarioMode)
+    ? body.scenarioMode
+    : "unified";
+  const candidateLevel =
+    body.candidateLevel === "basic" ||
+    body.candidateLevel === "standard" ||
+    body.candidateLevel === "prototype"
+      ? body.candidateLevel
+      : "basic";
+  const industry =
+    body.industry === "construction" ||
+    body.industry === "food" ||
+    body.industry === "manufacturing" ||
+    body.industry === "hotel" ||
+    body.industry === "care"
+      ? body.industry
+      : "construction";
+  const interviewerDifficulty =
+    body.interviewerDifficulty === "easy" || body.interviewerDifficulty === "hard"
+      ? body.interviewerDifficulty
+      : "easy";
+  const interviewerLiteracy =
+    body.interviewerLiteracy === "low" ||
+    body.interviewerLiteracy === "medium" ||
+    body.interviewerLiteracy === "high"
+      ? body.interviewerLiteracy
+      : "medium";
+  const interviewerPersonality =
+    body.interviewerPersonality === "balanced" ||
+    body.interviewerPersonality === "meticulous" ||
+    body.interviewerPersonality === "rough" ||
+    body.interviewerPersonality === "curious"
+      ? body.interviewerPersonality
+      : "balanced";
+  const interviewerDialect =
+    body.interviewerDialect === "standard" || body.interviewerDialect === "kansai"
+      ? body.interviewerDialect
+      : "standard";
+
+  const transcripts = Array.isArray(body.transcripts)
+    ? body.transcripts
+        .map((item): EvaluationTranscriptItem | null => {
+          if (!item || typeof item !== "object") return null;
+          const candidate = item as Record<string, unknown>;
+          if (
+            !isEvaluationTranscriptSource(candidate.source) ||
+            !isEvaluationPhase(candidate.phase) ||
+            typeof candidate.text !== "string"
+          ) {
+            return null;
+          }
+          const text = candidate.text.trim();
+          if (!text) return null;
+          return {
+            source: candidate.source,
+            phase: candidate.phase,
+            name:
+              typeof candidate.name === "string" && candidate.name.trim()
+                ? candidate.name.trim()
+                : toEvaluationSpeakerLabel({
+                    source: candidate.source,
+                    phase: candidate.phase,
+                    name: "",
+                    text
+                  }),
+            text: text.slice(0, 1400)
+          };
+        })
+        .filter((item): item is EvaluationTranscriptItem => Boolean(item))
+    : [];
+
+  if (!transcripts.length) {
+    res.status(400).json({ message: "評価対象の会話ログがありません。" });
+    return;
+  }
+
+  const salesTurns = transcripts.filter(
+    (item) => item.source === "user" && item.text.trim()
+  );
+  if (!salesTurns.length) {
+    res.status(400).json({ message: "営業発話がないため評価できません。" });
+    return;
+  }
+
+  const evaluationSignals = buildEvaluationSignals(transcripts, industry);
+  const evaluationScope = buildEvaluationScope(
+    transcripts,
+    scenarioMode,
+    evaluationSignals
+  );
+  const pattern1ManualImprovementPoints = buildPattern1ManualImprovementPoints(
+    transcripts,
+    evaluationSignals,
+    evaluationScope
+  );
+  const pattern2ManualImprovementPoints = buildPattern2ManualImprovementPoints(
+    transcripts,
+    evaluationSignals,
+    evaluationScope
+  );
+  const pattern3ManualImprovementPoints = buildPattern3ManualImprovementPoints(
+    transcripts,
+    evaluationSignals,
+    evaluationScope
+  );
+  const transcriptLines = buildEvaluationTranscriptLines(transcripts);
+  const salesLineReferences = buildEvaluationSalesLineReferences(transcripts);
+  const defaultCategories = buildDefaultEvaluationCategories();
+  try {
+    const evaluationRequestBody = {
+      model: OPENAI_EVALUATION_MODEL,
+      temperature: 0.2,
+      response_format: { type: "json_object" },
+      messages: [
+        {
+          role: "system",
+          content:
+            "あなたは外国人面接練習アプリ専用の厳格な評価者です。評価対象は営業担当の発話だけです。学生・面接官・企業の発話は、営業の説明が噛み合っているか、質問意図に答えられているか、伝わり方に問題があるかを判断する根拠としてだけ使ってください。今回 transcript に出ていない phase や話題を『不足』として指摘してはいけません。評価は今回実際に練習した範囲だけに限定してください。ASR 誤りには寛容に対応してください。相手が『承知しました』と返していても、営業側の説明が不十分・不正確なら高得点にしないでください。スコア定義は 5=Perfect, 4=Good, 3=Pass, 2=Fail, 1=Bad/NG です。根拠が薄いカテゴリは score を null にしてください。法的に危険な誤りや NG ワードがある場合は、関連カテゴリを 1 点相当に寄せてください。特に pattern1 only では、『事前指導』『主導権の維持』『やさしい日本語』『条件面の質問を控えさせる指導』を明示的に評価してください。Return strict JSON with keys categories, good_points, improvement_points, conversation_issues, overall_comment. categories must have facilitation, closing, knowledge, communication. Each category must have score (number 1-5 or null), summary (short Japanese), evidence (array of up to 2 short Japanese strings). The summary for each scored category must explain why that score was given. The evidence items should be short concrete reasons or cited moments, ideally with line numbers when possible. good_points should have 2-4 items and only mention topics that actually appeared in this transcript. improvement_points should have 2-4 items, and every item must cite one sales line by line number first, such as `L3「〜」: ...`. Each improvement must explain both what was weak in that exact utterance and how to say or structure it better. Do not give abstract advice without line references. conversation_issues should have 0-3 items and focus only on会話の噛み合わなさ・言い回しの不自然さ・省略 within the practiced scope."
+        },
+        {
+          role: "user",
+          content: JSON.stringify({
+            appContext: {
+              scenarioMode,
+              candidateLevel,
+              industry: getIndustryScenario(industry).label,
+              interviewerDifficulty,
+              interviewerLiteracy,
+              interviewerPersonality,
+              interviewerDialect
+            },
+            scoringRubric: {
+              overallPolicy:
+                "マニュアルの一言一句通りでなくても、成果として相手が納得できる説明なら高評価。",
+              categories: {
+                facilitation:
+                  "主導権の維持、学生へのやさしい日本語化、進行のリード。主に pattern1/pattern2 を見る。",
+                closing:
+                  "感想ヒアリング、合格後フロー提示、期日設定。主に pattern3 を見る。",
+                knowledge:
+                  "無料紹介の理由、技人国ビザ、特定技能との差分などの説明正確性。主に pattern3 を見る。pattern2 only では、事業紹介を実施した場合の『無料紹介の理由』だけを見て、技人国ビザのリスク説明不足を指摘してはいけない。",
+                communication:
+                  "相手理解に合わせた説明、日本語の自然さ、根拠ある安心感、傾聴と共感。全体を見る."
+              }
+            },
+            phaseSpecificRubric: {
+              pattern1:
+                "pattern1 では、進行管理と態度・伝わり方を中心に採点する。必須観点は ①出席確認（できれば手を上げる指示まで） ②リアクション練習とその理由説明 ③『日本でずっと働きたいです』の練習と『10年働きたい』を避ける注意 ④『大丈夫です！頑張ります！』の練習 ⑥良い質問の練習と、給料・ビザなど条件面の質問を避ける指導。⑤会社説明は今回省略してよい。特に (1) 学生へ望ましい回答を教えられているか、(2) 条件面の質問を控えるよう事前指導できているか、(3) 営業が練習を主導し各練習を整理して進めているか、(4) 学生向けにやさしい日本語で短く説明できているか、を明示的に見る。5点はこの必須観点が高水準で揃っている状態。3点は主要な定型回答練習はできているが、重要練習や注意喚起が一部抜けている状態。2点以下は期限付き回答の容認、条件面質問の放置、難しい用語の多用、学生が理解しにくい長い説明などが見られる状態。改善点では、必須観点のうち今回練習できていない項目があれば必ず具体的に指摘すること。",
+              pattern2:
+                "pattern2 では、進行管理と態度・伝わり方を中心に採点する。必須観点は ①営業が自己紹介開始を案内できているか ②学生の自己紹介直後に担当目線の補足や本人の意欲の代弁をすぐ入れて主導権を維持できているか ③企業へ仕事内容・1日の流れ・雰囲気の説明を依頼できているか ④企業から学生への質問に営業が必ず間に入り、やさしい日本語へ言い換えて中継できているか ⑤企業説明後に『大変な時でも大丈夫ですか』『頑張れますか』の確認ができているか ⑥ビザ話題が出た場合に学生を退出させてから説明へ切り替えられるか。5点は、営業が終始主導権を持ち、学生にも企業にも分かりやすくつないでいる状態。3点は、進行自体は成立しているが、補足説明・質問中継・やさしい日本語化のいずれかが弱い状態。2点以下は、企業と学生の直接会話を放置する、自己紹介後の補足がなく主導権を失う、難しい言葉のまま学生へ振る、ビザ話題を学生前で処理するなど、マニュアルから外れる状態。定型として成立している発話に対して、『もっと具体的に』『もっと詳しく』といった上積み提案だけで改善点を作ってはいけません。改善点は、必須観点の欠落・逸脱・誤進行がある sales line に限り、どの line をどう直すべきかを具体的に示すこと。",
+              pattern3:
+                "pattern3 では、クロージング・知識正確性・態度/伝わり方を中心に採点する。必須観点は、会話の branch に応じて判定する。口頭内定が出ていない流れでは ①最初に全体的な印象を聞けているか ②『2〜3日以内に結果連絡をいただけるか』と具体期日を切れているか ③口頭内定前でも内定通知書（労働条件通知書）の雛形送付を提案できているか ④内定通知書受領までは本人に合格と伝えられないことを明示できているか、を重視する。口頭内定が出ている流れでは ①企業が挙げた候補者を軽く肯定して後押しできているか ②本日中または明日中の返送期日を営業側から具体的に切れているか、を重視する。共通観点として ③技人国ビザについて『単純作業だけは不可』『将来的な管理業務のキャリアパスが必要』を正確に説明できているか ④採用理由書のため将来のキャリアアップ可能性を確認できているか ⑤必要書類、審査期間、許可率などの案内が適切か、をみる。5点は、branch に応じた必須事項を押さえ、制度説明にも誤りがなく、回収・次工程まで明確に進められている状態。3点は、大枠は正しいが、期限設定・雛形送付・本人通知不可の明示など重要要素が一部弱い状態。2点以下は、曖昧な期日で終える、技人国説明が不正確、書面回収前に合格連絡できるように聞こえる、などマニュアルから外れる状態。改善点では、どの sales line をどう言い換えればよかったかまで具体的に示すこと。"
+            },
+            groundTruth: {
+              gijinkoku:
+                "学歴要件を満たした高度人材向け。更新制（1年・3年・5年）で更新継続により長期就労可。管理費不要。単純作業だけは不可で、将来的な管理業務のキャリアパスが必要。",
+              tokutei:
+                "原則最長5年。支援機関や監理団体が入り、月々の管理費が発生する。",
+              businessModel:
+                "教育事業の受講料・授業料で収益化しているため、企業への紹介料は無料。"
+            },
+            scopeControl: {
+              phasesPresent: evaluationSignals.phasesPresent,
+              applicableCategories: evaluationScope.applicableCategories,
+              nonApplicableCategories: evaluationScope.nonApplicableCategories,
+              notes: evaluationScope.promptNotes
+            },
+            machineSignals: evaluationSignals,
+            salesLineReferences,
+            transcript: transcriptLines
+          })
+        }
+      ]
+    };
+
+    let response: Response | null = null;
+    let lastEvaluationError: unknown = null;
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 45000);
+      try {
+        response = await fetch("https://api.openai.com/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${OPENAI_API_KEY}`
+          },
+          signal: controller.signal,
+          body: JSON.stringify(evaluationRequestBody)
+        });
+        if (response.ok) {
+          clearTimeout(timeoutId);
+          break;
+        }
+        lastEvaluationError = new Error(`OpenAI evaluation status ${response.status}`);
+        const errorText = await response.text();
+        console.error(`[EvaluationAPI] OpenAI error attempt ${attempt}:`, errorText);
+      } catch (error) {
+        lastEvaluationError = error;
+        console.error(`[EvaluationAPI] fetch attempt ${attempt} failed:`, error);
+      } finally {
+        clearTimeout(timeoutId);
+      }
+      if (attempt < 2) {
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+    }
+
+    if (!response || !response.ok) {
+      console.error("[EvaluationAPI] final error:", lastEvaluationError);
+      res.status(502).json({ message: "評価生成に失敗しました。" });
+      return;
+    }
+
+    const data = (await response.json()) as {
+      choices?: Array<{ message?: { content?: string } }>;
+    };
+    const content = data.choices?.[0]?.message?.content;
+    if (!content) {
+      res.status(502).json({ message: "評価結果の取得に失敗しました。" });
+      return;
+    }
+
+    const parsed = JSON.parse(content) as {
+      categories?: Partial<
+        Record<
+          EvaluationCategoryKey,
+          {
+            score?: unknown;
+            summary?: unknown;
+            evidence?: unknown;
+          }
+        >
+      >;
+      good_points?: unknown;
+      improvement_points?: unknown;
+      conversation_issues?: unknown;
+      overall_comment?: unknown;
+    };
+
+    const categories = buildDefaultEvaluationCategories();
+    for (const key of Object.keys(categories) as EvaluationCategoryKey[]) {
+      if (evaluationScope.nonApplicableCategories.includes(key)) {
+        categories[key] = {
+          score: null,
+          label: "N/A",
+          summary: "今回の練習範囲では未評価です。",
+          evidence: []
+        };
+        continue;
+      }
+      const candidate = parsed.categories?.[key];
+      const score = coerceEvaluationScore(candidate?.score);
+      const summary =
+        typeof candidate?.summary === "string" && candidate.summary.trim()
+          ? candidate.summary.trim()
+          : categories[key].summary;
+      const evidence = Array.isArray(candidate?.evidence)
+        ? dedupeStrings(
+            candidate.evidence.filter((item): item is string => typeof item === "string"),
+            2
+          )
+        : [];
+      categories[key] = {
+        score,
+        label: scoreToEvaluationLabel(score),
+        summary,
+        evidence
+      };
+    }
+
+    for (const finding of evaluationSignals.ngFindings) {
+      const current = categories[finding.category];
+      categories[finding.category] = {
+        score: 1,
+        label: scoreToEvaluationLabel(1),
+        summary: `${current.summary} NG表現または危険説明が含まれています。`.trim(),
+        evidence: dedupeStrings(
+          [...current.evidence, `${finding.phase}: ${finding.phrase}`],
+          2
+        )
+      };
+    }
+
+    const scoredValues = (Object.keys(categories) as EvaluationCategoryKey[])
+      .map((key) => categories[key].score)
+      .filter((value): value is number => value !== null);
+    const overallScore = scoredValues.length
+      ? Math.round((scoredValues.reduce((sum, value) => sum + value, 0) / scoredValues.length) * 10) / 10
+      : null;
+    const parsedOverallComment =
+      typeof parsed.overall_comment === "string"
+        ? parsed.overall_comment.trim()
+        : "";
+
+    const aiImprovementPoints = Array.isArray(parsed.improvement_points)
+      ? filterEvaluationListByScope(
+          parsed.improvement_points.filter(
+            (item): item is string =>
+              typeof item === "string" && isActionableImprovementPoint(item)
+          ),
+          evaluationScope,
+          5
+        )
+      : [];
+
+    const responseBody: EvaluationResponseBody = {
+      overallScore,
+      overallLabel: scoreToEvaluationLabel(overallScore),
+      overallComment:
+        parsedOverallComment &&
+        !evaluationScope.forbiddenRegexes.some((pattern) =>
+          pattern.test(parsedOverallComment)
+        )
+          ? parsedOverallComment
+          : evaluationScope.fallbackOverallComment,
+      categories,
+      goodPoints: Array.isArray(parsed.good_points)
+        ? filterEvaluationListByScope(
+            parsed.good_points.filter((item): item is string => typeof item === "string"),
+            evaluationScope,
+            4
+          )
+        : [],
+      improvementPoints: aiImprovementPoints,
+      conversationIssues: Array.isArray(parsed.conversation_issues)
+        ? filterEvaluationListByScope(
+            parsed.conversation_issues.filter(
+              (item): item is string => typeof item === "string"
+            ),
+            evaluationScope,
+            3
+          )
+        : [],
+      ngFindings: evaluationSignals.ngFindings
+    };
+
+    if (evaluationScope.pattern2Only) {
+      const pattern2SalesLines = salesLineReferences.filter(
+        (line) => line.phase === "pattern2"
+      );
+      const businessModelLine =
+        pattern2SalesLines.find((line) =>
+          /紹介料|教育事業|受講料|授業料/u.test(line.text)
+        ) ?? null;
+      const relayLine =
+        pattern2SalesLines.find((line) =>
+          /ジョンさん、|皆さん、|大丈夫ですか|働きたいですか|何ですか/u.test(line.text)
+        ) ?? null;
+      const hasObjectiveCommunicationIssue =
+        evaluationSignals.pattern2.usedAdvancedBusinessTerms ||
+        evaluationSignals.pattern2.directInterviewerQuestionCount > 0;
+      const satisfiedFacilitationChecklist =
+        evaluationSignals.pattern2.requestedSelfIntroduction &&
+        evaluationSignals.pattern2.gaveImmediateSupplement &&
+        evaluationSignals.pattern2.requestedCompanyOverview &&
+        evaluationSignals.pattern2.checkedHardWorkCommitment &&
+        evaluationSignals.pattern2.promptedStudentExit &&
+        evaluationSignals.pattern2.directInterviewerQuestionCount === 0 &&
+        evaluationSignals.pattern2.handledVisaQuestionAfterExit;
+
+      responseBody.conversationIssues = [];
+
+      if (evaluationSignals.pattern2.explainedBusinessModel) {
+        responseBody.categories.knowledge = {
+          score: Math.max(responseBody.categories.knowledge.score ?? 4, 4),
+          label: scoreToEvaluationLabel(
+            Math.max(responseBody.categories.knowledge.score ?? 4, 4)
+          ),
+          summary:
+            "無料紹介の理由を教育事業ベースで説明できており、事業紹介としての正確性は概ね良好です。",
+          evidence: businessModelLine
+            ? [
+                `${businessModelLine.line}「${clipEvaluationText(
+                  businessModelLine.text,
+                  34
+                )}」`
+              ]
+            : []
+        };
+      } else {
+        responseBody.categories.knowledge = {
+          score: null,
+          label: "N/A",
+          summary: "今回の練習範囲では未評価です。",
+          evidence: []
+        };
+      }
+
+      if (!hasObjectiveCommunicationIssue) {
+        const communicationScore = Math.max(
+          responseBody.categories.communication.score ?? 4,
+          4
+        );
+        responseBody.categories.communication = {
+          score: communicationScore,
+          label: scoreToEvaluationLabel(communicationScore),
+          summary:
+            "営業が企業の質問や意図を学生へ中継できており、伝わり方は概ね良好です。",
+          evidence: relayLine
+            ? [
+                `${relayLine.line}「${clipEvaluationText(relayLine.text, 34)}」`
+              ]
+            : []
+        };
+      }
+
+      if (satisfiedFacilitationChecklist) {
+        responseBody.categories.facilitation = {
+          score: 5,
+          label: scoreToEvaluationLabel(5),
+          summary:
+            "営業が面接の主導権を維持し、自己紹介、補足、企業説明依頼、学生確認、退出まで安定して進行できています。",
+          evidence: dedupeStrings(
+            [
+              pattern2SalesLines[0]
+                ? `${pattern2SalesLines[0].line}「${clipEvaluationText(
+                    pattern2SalesLines[0].text,
+                    34
+                  )}」`
+                : "",
+              relayLine
+                ? `${relayLine.line}「${clipEvaluationText(relayLine.text, 34)}」`
+                : ""
+            ],
+            2
+          )
+        };
+      }
+
+      if (satisfiedFacilitationChecklist && !hasObjectiveCommunicationIssue) {
+        responseBody.overallComment =
+          "営業が主導権を維持し、企業質問の中継や学生への確認も安定して行えていました。今回の練習で重視したいポイントはしっかり押さえられています。";
+      }
+    }
+
+    const rescoredValues = (Object.keys(responseBody.categories) as EvaluationCategoryKey[])
+      .map((key) => responseBody.categories[key].score)
+      .filter((value): value is number => value !== null);
+    responseBody.overallScore = rescoredValues.length
+      ? Math.round(
+          (rescoredValues.reduce((sum, value) => sum + value, 0) / rescoredValues.length) *
+            10
+        ) / 10
+      : null;
+    responseBody.overallLabel = scoreToEvaluationLabel(responseBody.overallScore);
+
+    responseBody.improvementPoints = dedupeStrings(
+      [
+        ...pattern1ManualImprovementPoints,
+        ...pattern2ManualImprovementPoints,
+        ...pattern3ManualImprovementPoints,
+        ...(evaluationScope.pattern2Only ? [] : responseBody.improvementPoints)
+      ],
+      5
+    );
+
+    if (responseBody.improvementPoints.length === 0) {
+      if (evaluationScope.pattern2Only) {
+        responseBody.improvementPoints = [];
+      } else {
+        responseBody.improvementPoints = buildFallbackImprovementPoints(
+          transcripts,
+          evaluationScope
+        );
+      }
+    }
+
+    if (
+      evaluationScope.pattern2Only &&
+      responseBody.improvementPoints.length === 0 &&
+      responseBody.conversationIssues.length === 0
+    ) {
+      if (responseBody.categories.communication.score !== null) {
+        responseBody.categories.communication = {
+          ...responseBody.categories.communication,
+          score: 5,
+          label: scoreToEvaluationLabel(5),
+          summary:
+            "企業の質問や意図を学生へ安定して中継できており、伝わり方も良好です。"
+        };
+      }
+      if (responseBody.categories.knowledge.score !== null) {
+        responseBody.categories.knowledge = {
+          ...responseBody.categories.knowledge,
+          score: 5,
+          label: scoreToEvaluationLabel(5),
+          summary:
+            "無料紹介の理由を正確に説明できており、事業紹介として十分な内容です。"
+        };
+      }
+      const finalPattern2Scores = (Object.keys(
+        responseBody.categories
+      ) as EvaluationCategoryKey[])
+        .map((key) => responseBody.categories[key].score)
+        .filter((value): value is number => value !== null);
+      responseBody.overallScore = finalPattern2Scores.length
+        ? Math.round(
+            (finalPattern2Scores.reduce((sum, value) => sum + value, 0) /
+              finalPattern2Scores.length) *
+              10
+          ) / 10
+        : null;
+      responseBody.overallLabel = scoreToEvaluationLabel(responseBody.overallScore);
+      responseBody.overallComment =
+        "営業が主導権を維持し、自己紹介、補足、企業説明依頼、質問中継、学生確認、退出まで安定して進行できていました。今回の練習で重視したいポイントはしっかり押さえられています。";
+    }
+
+    res.json(responseBody);
+  } catch (error) {
+    console.error("[EvaluationAPI] error:", error);
+    res.status(500).json({ message: "面接評価の生成中にエラーが発生しました。" });
+  }
 });
 
 wss.on("connection", (clientSocket) => {
@@ -310,12 +1908,35 @@ wss.on("connection", (clientSocket) => {
   };
   let pendingTranscriptionRefresh = false;
   let waitingForSessionRefresh = false;
+  let sessionRefreshWatchdogTimer: ReturnType<typeof setTimeout> | null = null;
   let interruptPending = false;
   let pendingInterruptTarget: AiKey | null = null;
   let pendingInterruptPrompt: string | null = null;
   let interruptCooldownUntil = 0;
   let waitingForHuman = false;
   let manualAdvanceReady = false;
+  const clearSessionRefreshWatchdog = () => {
+    if (!sessionRefreshWatchdogTimer) return;
+    clearTimeout(sessionRefreshWatchdogTimer);
+    sessionRefreshWatchdogTimer = null;
+  };
+  const scheduleSessionRefreshWatchdog = (reason: "start" | "refresh") => {
+    clearSessionRefreshWatchdog();
+    sessionRefreshWatchdogTimer = setTimeout(() => {
+      if (!waitingForSessionRefresh) return;
+      console.warn(
+        `[SessionRefreshWatchdog] forcing ready after timeout reason=${reason} pending=${JSON.stringify(
+          pendingSessionRefresh
+        )} transcriptionPending=${pendingTranscriptionRefresh}`
+      );
+      pendingSessionRefresh = {
+        ai_a: false,
+        ai_b: false
+      };
+      pendingTranscriptionRefresh = false;
+      maybeStartPendingSession();
+    }, 2500);
+  };
   type Phase = "pattern1" | "pattern2" | "pattern3";
   let phase: Phase = "pattern1";
   type ScenarioMode = "unified" | "pattern1" | "pattern2" | "pattern3";
@@ -337,13 +1958,6 @@ wss.on("connection", (clientSocket) => {
     instructions: string[];
     text: string;
   };
-  type Pattern1Stage =
-    | "attendance"
-    | "reaction"
-    | "work_intent"
-    | "effort"
-    | "good_question"
-    | "complete";
   type IntroPhase =
     | "sales_intro"
     | "company_greeting"
@@ -379,7 +1993,6 @@ wss.on("connection", (clientSocket) => {
     | "other";
   let introPhase: IntroPhase = "complete";
   let pattern3Section: Pattern3Section = "opening";
-  let pattern1Stage: Pattern1Stage = "attendance";
   let companyGreetingPromptPending = false;
   let companyIntroAckPromptPending = false;
   let studentIntroApprovalPromptPending = false;
@@ -401,6 +2014,11 @@ wss.on("connection", (clientSocket) => {
   let studentIntroPromptPending = false;
   const endMarkers = ["【面接終了】", "【面接中止】"];
   let lastPhaseNotified: Phase | null = null;
+  let completedPracticePhases: Record<Phase, boolean> = {
+    pattern1: false,
+    pattern2: false,
+    pattern3: false
+  };
   type CoverageKey =
     | "experience"
     | "motivation"
@@ -467,11 +2085,9 @@ wss.on("connection", (clientSocket) => {
         selectedQuestionId: string | null;
       }
     | null = null;
-  let candidateValidationRetryCount = 0;
-  let followUpCountsByIntent: Partial<Record<CoverageKey, number>> = {};
-  let followUpTopicUsage: Record<string, number> = {};
+  let candidateValidationRetriedForCurrentPrompt = false;
+  let followUpTopicUsage: Record<string, true> = {};
   const MAX_HISTORY_ENTRIES = 12;
-  const MAX_CANDIDATE_VALIDATION_RETRIES = 2;
   const BUFFERED_CANDIDATE_AUDIO_DONE_FALLBACK_MS = 1400;
   const getBufferedCandidatePlaybackFallbackMs = (text: string) =>
     Math.max(1200, Math.min(5000, text.length * 140));
@@ -660,9 +2276,6 @@ wss.on("connection", (clientSocket) => {
           getSelectedCandidateQuestionIdForValidation()
         )
       ));
-  const getMaxFollowUpsPerIntent = () =>
-    interviewerSettings.difficulty === "hard" ? 2 : 0;
-  const MAX_FOLLOWUPS_PER_TOPIC = 1;
   type FollowUpTopic = IndustryFollowUpTopicSpec;
   const GENERIC_FOLLOW_UP_TOPICS: Record<
     Exclude<CoverageKey, "experience">,
@@ -787,12 +2400,66 @@ wss.on("connection", (clientSocket) => {
       }
     ]
   };
+  const buildTranscriptNormalizationEntries = (): Array<{
+    pattern: RegExp;
+    replacement: string;
+  }> => {
+    const scenario = getCurrentIndustryScenario();
+    const candidateName = getCurrentCandidateName() ?? scenario.candidateProfile.name;
+    const entries: Array<{ pattern: RegExp; replacement: string }> = [
+      { pattern: /株式会社\s*(?:ひときわ|ヒトキワ)/gu, replacement: "株式会社ヒトキワ" },
+      { pattern: /ひときわ/gu, replacement: "ヒトキワ" },
+      { pattern: /ぎじんこく|ギジンコク|議事国/gu, replacement: "技人国" },
+      { pattern: /とくていぎのう|トクテイギノウ/gu, replacement: "特定技能" },
+      { pattern: /じぜんれんしゅう|事前れんしゅう/gu, replacement: "事前練習" },
+      { pattern: /めんせつまえれんしゅう|面接前れんしゅう/gu, replacement: "面接前練習" },
+      { pattern: /りあくしょん/gu, replacement: "リアクション" },
+      { pattern: /じこしょうかい/gu, replacement: "自己紹介" },
+      { pattern: /さいようりゆうしょ/gu, replacement: "採用理由書" },
+      { pattern: /ないていつうちしょ/gu, replacement: "内定通知書" },
+      { pattern: /ろうどうじょうけんつうちしょ/gu, replacement: "労働条件通知書" },
+      { pattern: /こようけいやくしょ/gu, replacement: "雇用契約書" },
+      { pattern: /ぎょうせいしょし/gu, replacement: "行政書士" },
+      { pattern: /なかじま|中嶋/gu, replacement: "中島" },
+      { pattern: /たなか/gu, replacement: "田中" },
+      { pattern: /ぐーなび|グーナビ/gu, replacement: "グーナビ" }
+    ];
+
+    if (scenario.id === "construction") {
+      entries.push(
+        { pattern: /けんちく/gu, replacement: "建築" },
+        { pattern: /げんば/gu, replacement: "現場" },
+        { pattern: /しざい(?:うんぱん|はこび)/gu, replacement: "資材運搬" },
+        { pattern: /こうぐ/gu, replacement: "工具" }
+      );
+    }
+
+    if (candidateName) {
+      const escapedName = escapeRegex(candidateName);
+      entries.unshift(
+        {
+          pattern: new RegExp(`${escapedName}(?:ソン|そん)`, "gu"),
+          replacement: candidateName
+        },
+        {
+          pattern: new RegExp(`${escapedName}\\s*さん`, "gu"),
+          replacement: `${candidateName}さん`
+        }
+      );
+      if (candidateName === "ジョン") {
+        entries.unshift(
+          { pattern: /ジョンソン|ジョーン|ジョオン/gu, replacement: "ジョン" }
+        );
+      }
+    }
+
+    return entries;
+  };
   const normalizeKnownTranscriptTerms = (text: string) =>
-    text
-      .replace(/ひときわ/gi, "ヒトキワ")
-      .replace(/株式会社ヒトキワ/gi, "株式会社ヒトキワ")
-      .replace(/ぎじんこく/gi, "技人国")
-      .replace(/議事国/gi, "技人国");
+    buildTranscriptNormalizationEntries().reduce(
+      (normalized, entry) => normalized.replace(entry.pattern, entry.replacement),
+      text
+    );
   const detectInterviewIntent = (text: string): InterviewIntent => {
     const normalized = text.replace(/\s+/g, "");
     if (!normalized) return "other";
@@ -2381,9 +4048,7 @@ wss.on("connection", (clientSocket) => {
   };
   const getAvailableFollowUpTopics = (intent: CoverageKey) =>
     getFollowUpTopicsForIntent(intent).filter(
-      (topic) =>
-        (followUpTopicUsage[getFollowUpTopicUsageKey(intent, topic.key)] ?? 0) <
-        MAX_FOLLOWUPS_PER_TOPIC
+      (topic) => !followUpTopicUsage[getFollowUpTopicUsageKey(intent, topic.key)]
     );
   const buildTopicAwareFollowUpGuidance = (
     intent: CoverageKey,
@@ -2397,11 +4062,6 @@ wss.on("connection", (clientSocket) => {
     if (interviewerSettings.difficulty === "hard") {
       return null;
     }
-    const intentCount = followUpCountsByIntent[intent] ?? 0;
-    if (intentCount >= getMaxFollowUpsPerIntent()) {
-      return null;
-    }
-
     const combinedText = `${candidateAnswer} ${salesSupplement}`.trim();
     const isHardDifficulty = interviewerSettings.difficulty === "hard";
     const shallowAnswer = isCandidateAnswerShallow(intent, candidateAnswer);
@@ -2443,7 +4103,7 @@ wss.on("connection", (clientSocket) => {
     }
 
     const genericKey = getFollowUpTopicUsageKey(intent, "generic");
-    if ((followUpTopicUsage[genericKey] ?? 0) >= MAX_FOLLOWUPS_PER_TOPIC) {
+    if (followUpTopicUsage[genericKey]) {
       return null;
     }
     if (!isHardDifficulty && assessment !== "partial" && !shallowAnswer) {
@@ -2462,9 +4122,8 @@ wss.on("connection", (clientSocket) => {
     };
   };
   const markFollowUpUsed = (intent: CoverageKey, topicKey: string) => {
-    followUpCountsByIntent[intent] = (followUpCountsByIntent[intent] ?? 0) + 1;
     const usageKey = getFollowUpTopicUsageKey(intent, topicKey);
-    followUpTopicUsage[usageKey] = (followUpTopicUsage[usageKey] ?? 0) + 1;
+    followUpTopicUsage[usageKey] = true;
   };
   const hasCandidateConfusionSignal = (text: string) =>
     /わからない|わかりません|知りません|難しい|むずかしい|もう一回|もういちど|聞き取れない|聞き取れません|聞こえない|聞こえません|理解できない|意味わからない|sorry/i.test(
@@ -2622,6 +4281,7 @@ wss.on("connection", (clientSocket) => {
   const shouldTransitionToPattern3 = (text: string) => {
     const normalized = text.replace(/\s+/g, "");
     if (!normalized) return false;
+    if (looksLikePattern2ClosureApprovalIntent(text)) return false;
 
     const hardBlockers = [
       /入室/,
@@ -4104,6 +5764,13 @@ wss.on("connection", (clientSocket) => {
   const isPattern2InterviewClosingUtterance = (text: string) => {
     const normalized = text.replace(/\s+/g, "");
     if (phase !== "pattern2" || !normalized) return false;
+    if (
+      /よろしいでしょうか|よろしいですか|いいですか|可能でしょうか|してもよろしい|いただく形でよろしい/.test(
+        normalized
+      ) || /もよろしいでしょうか|もよろしいですか/.test(normalized)
+    ) {
+      return false;
+    }
     const candidateName = getCurrentCandidateName();
     const addressedCandidate =
       (candidateName
@@ -4294,43 +5961,6 @@ wss.on("connection", (clientSocket) => {
       /どのように答えますか/,
       /どう答えますか/
     ]);
-  const getDefaultPattern1Mode = (): CandidateResponseMode => {
-    switch (pattern1Stage) {
-      case "attendance":
-        return "attendance";
-      case "reaction":
-        return "reaction";
-      case "work_intent":
-        return "fixed_work_intent";
-      case "effort":
-        return "fixed_effort";
-      case "good_question":
-        return "good_question";
-      default:
-        return "acknowledge";
-    }
-  };
-  const advancePattern1Stage = (mode: CandidateResponseMode) => {
-    switch (mode) {
-      case "attendance":
-        pattern1Stage = "reaction";
-        break;
-      case "reaction":
-        pattern1Stage = "work_intent";
-        break;
-      case "fixed_work_intent":
-        pattern1Stage = "effort";
-        break;
-      case "fixed_effort":
-        pattern1Stage = "good_question";
-        break;
-      case "good_question":
-        pattern1Stage = "complete";
-        break;
-      default:
-        break;
-    }
-  };
   const classifyPattern1DirectiveByRules = (
     text: string
   ): { mode: CandidateResponseMode | null; confidence: "high" | "medium" | "low" } => {
@@ -4339,35 +5969,31 @@ wss.on("connection", (clientSocket) => {
     if (!normalized) {
       return { mode: "acknowledge", confidence: "high" };
     }
+    if (isPattern1PracticeClosingPrompt(text)) {
+      return { mode: "acknowledge", confidence: "high" };
+    }
     if (isPattern1ReactionPrompt(normalized)) {
       return { mode: "reaction", confidence: "high" };
     }
     if (
       isPattern1WorkIntentPrompt(normalized) &&
-      (isDrillAnswerPrompt || /聞かれたら|質問練習|練習/.test(normalized) || pattern1Stage === "work_intent")
+      (isDrillAnswerPrompt || /聞かれたら|質問練習|練習/.test(normalized))
     ) {
       return {
-        mode: isDrillAnswerPrompt || pattern1Stage !== "complete"
-          ? "fixed_work_intent"
-          : "answer_question",
+        mode: "fixed_work_intent",
         confidence: "high"
       };
     }
     if (
       isPattern1EffortPrompt(normalized) &&
-      (isDrillAnswerPrompt || /聞かれたら|質問練習|練習/.test(normalized) || pattern1Stage === "effort")
+      (isDrillAnswerPrompt || /聞かれたら|質問練習|練習/.test(normalized))
     ) {
       return {
-        mode: isDrillAnswerPrompt || pattern1Stage !== "complete"
-          ? "fixed_effort"
-          : "answer_question",
+        mode: "fixed_effort",
         confidence: "high"
       };
     }
-    if (
-      isPattern1GoodQuestionFeedbackPrompt(normalized) &&
-      (pattern1Stage === "good_question" || pattern1Stage === "complete")
-    ) {
+    if (isPattern1GoodQuestionFeedbackPrompt(normalized)) {
       return { mode: "acknowledge", confidence: "medium" };
     }
     if (isPattern1GoodQuestionGeneratePrompt(normalized)) {
@@ -4400,7 +6026,8 @@ wss.on("connection", (clientSocket) => {
     mode === "attendance" ||
     mode === "reaction" ||
     mode === "fixed_work_intent" ||
-    mode === "fixed_effort";
+    mode === "fixed_effort" ||
+    mode === "acknowledge";
   const classifyPattern1DirectiveWithAi = async (
     text: string,
     defaultMode: CandidateResponseMode
@@ -4432,7 +6059,6 @@ wss.on("connection", (clientSocket) => {
               role: "user",
               content: JSON.stringify({
                 phase: "pattern1",
-                pattern1Stage,
                 defaultMode,
                 candidateName: getCurrentCandidateName(),
                 utterance: text,
@@ -4492,7 +6118,7 @@ wss.on("connection", (clientSocket) => {
     const defaultMode =
       ruleResult.mode && ruleResult.confidence !== "low"
         ? ruleResult.mode
-        : getDefaultPattern1Mode();
+        : "acknowledge";
     const aiResult = await classifyPattern1DirectiveWithAi(text, defaultMode);
     if (aiResult.confidence === "high" || aiResult.confidence === "medium") {
       return aiResult.mode;
@@ -4500,7 +6126,7 @@ wss.on("connection", (clientSocket) => {
     if (ruleResult.mode && ruleResult.confidence !== "low") {
       return ruleResult.mode;
     }
-    return getDefaultPattern1Mode();
+    return "acknowledge";
   };
   const validateCandidateResponseWithAi = async (input: {
     salesText: string;
@@ -4539,7 +6165,6 @@ wss.on("connection", (clientSocket) => {
               role: "user",
               content: JSON.stringify({
                 phase,
-                pattern1Stage,
                 industry: getCurrentIndustryScenario().label,
                 candidateLevel: candidateLanguageLevel,
                 mode: input.mode,
@@ -4971,7 +6596,6 @@ wss.on("connection", (clientSocket) => {
               role: "user",
               content: JSON.stringify({
                 phase: currentPhase,
-                pattern1Stage,
                 candidateLevel: candidateLanguageLevel,
                 industry: getCurrentIndustryScenario().label,
                 pendingCandidateRetry,
@@ -5046,6 +6670,15 @@ wss.on("connection", (clientSocket) => {
     const normalized = normalizeText(salesText);
     if (!normalized) return false;
     if (currentPhase === "pattern1") {
+      if (
+        mode === "acknowledge" &&
+        isPattern1GoodQuestionFeedbackPrompt(normalized)
+      ) {
+        return false;
+      }
+      if (isPattern1PracticeClosingPrompt(salesText)) {
+        return false;
+      }
       const sentenceCount = salesText
         .split(/[。！？!?]/)
         .map((part) => part.trim())
@@ -5056,8 +6689,6 @@ wss.on("connection", (clientSocket) => {
         mode === "good_question" ||
         looksLikeStandalonePattern1NameCall(salesText) ||
         sentenceCount >= 2 ||
-        pattern1Stage === "good_question" ||
-        pattern1Stage === "complete" ||
         containsAny(normalized, [
           /いいですね/,
           /そのように/,
@@ -5107,7 +6738,6 @@ wss.on("connection", (clientSocket) => {
               role: "user",
               content: JSON.stringify({
                 phase: currentPhase,
-                pattern1Stage,
                 candidateName: getCurrentCandidateName(),
                 proposedMode,
                 proposedPrompt,
@@ -5871,14 +7501,22 @@ wss.on("connection", (clientSocket) => {
         (value.match(/[A-Za-z]/g)?.length ?? 0) / Math.max(value.length, 1);
       return (
         asciiRatio > 0.35 &&
-        /let me know|need more help|how can i help|happy to help|anything else|if you need|sales representative|next prompt|self-introduction|wait for|before continuing|can add a supplement/i.test(
+        /let me know|need more help|how can i help|happy to help|anything else|if you need|sales representative|next prompt|self-introduction|wait for|before continuing|can add a supplement|understood\.?|here is the exact line|as requested|say exactly|follow this one-turn|nothing else in this turn/i.test(
           value
         )
       );
     };
 
     const looksLikeLeakedInstructionReply = (value: string) =>
-      /sales representative|candidate|self-introduction|next prompt|wait for their next prompt|respond only after|before continuing|can add a supplement|営業担当|次の指示|待ってください/i.test(
+      /sales representative|candidate|self-introduction|next prompt|wait for their next prompt|respond only after|before continuing|can add a supplement|understood\.?|here is the exact line|as requested|say exactly|nothing else in this turn|営業担当|次の指示|待ってください|指示されてい|指示されています|と言われてい|短く答えるように|そのため|ですので|とお答えします|と答えます/u.test(
+        value
+      ) ||
+      /今は[「『].+[」』]と短く答えるように/u.test(value) ||
+      /[「『].+[」』](とお答えします|と答えます)/u.test(value) ||
+      /(今は|今回は).*(状況なので|場面なので|流れなので).*(お伝えします|答えます|お答えします)/u.test(
+        value
+      ) ||
+      /(そのように|このように).*(お伝えします|答えます|お答えします)/u.test(
         value
       );
 
@@ -5946,6 +7584,23 @@ wss.on("connection", (clientSocket) => {
       }
     };
 
+    const extractSafeShortCandidateReply = (value: string) => {
+      const normalizedValue = normalizeText(value);
+      if (/もうない|ありません|ないです/u.test(normalizedValue)) {
+        return "もうないです。";
+      }
+      if (/大丈夫です/u.test(normalizedValue)) {
+        return "大丈夫です。";
+      }
+      if (/頑張ります/u.test(normalizedValue)) {
+        return "大丈夫です！頑張ります！";
+      }
+      if (/日本でずっと働きたい/u.test(normalizedValue)) {
+        return "日本でずっと働きたいです。";
+      }
+      return null;
+    };
+
     const candidateName =
       getCurrentCandidateName() ?? getCurrentIndustryScenario().candidateProfile.name;
 
@@ -5954,7 +7609,9 @@ wss.on("connection", (clientSocket) => {
       (looksLikeEnglishMetaReply(normalized) ||
         looksLikeLeakedInstructionReply(normalized))
     ) {
-      const fallback = buildCandidateFallbackFromContext(effectiveMode);
+      const fallback =
+        extractSafeShortCandidateReply(normalized) ??
+        buildCandidateFallbackFromContext(effectiveMode);
       console.log(
         `[CandidateNormalizeFallback] mode=${effectiveMode} raw="${normalized}" fallback="${fallback}"`
       );
@@ -6139,7 +7796,6 @@ wss.on("connection", (clientSocket) => {
               role: "user",
               content: JSON.stringify({
                 phase,
-                pattern1Stage,
                 candidateLevel: candidateLanguageLevel,
                 candidateName: getCurrentCandidateName(),
                 industry: getCurrentIndustryScenario().label,
@@ -6552,6 +8208,16 @@ ${salesText}${buildInterviewerNameBlock()}
     if (!stripped || stripped === text.trim()) return false;
     return isAcknowledgementOnlyUtterance(stripped);
   };
+  const isPattern1PracticeClosingPrompt = (text: string) => {
+    const normalized = normalizeText(text);
+    if (!normalized) return false;
+    return containsAny(normalized, [
+      /面接官が入室するので.*面接を始めましょう/u,
+      /では.*面接を始めましょう/u,
+      /事前練習.*以上/u,
+      /ここまで.*練習/u
+    ]);
+  };
   const getLatestCommittedNonSalesSpeaker = () =>
     [...conversationHistory].reverse().find((entry) => entry.speaker !== "sales")
       ?.speaker ?? null;
@@ -6795,6 +8461,7 @@ ${salesText}${buildInterviewerNameBlock()}
   ) => {
     const normalized = normalizeText(text);
     if (!normalized) return false;
+    if (phase === "pattern1") return false;
     if (phase === "pattern3") return false;
     if (ruleResult.target === null) return true;
     if (ruleResult.target === "none") return false;
@@ -7163,14 +8830,24 @@ ${salesText}${buildInterviewerNameBlock()}
   const maybeStartPendingSession = () => {
     if (!pendingStart && !waitingForSessionRefresh) return;
     if (!sessionReady.ai_a || !sessionReady.ai_b) {
+      console.log(
+        `[Sessions] still waiting for socket readiness ai_a=${sessionReady.ai_a} ai_b=${sessionReady.ai_b} pendingStart=${pendingStart} waitingRefresh=${waitingForSessionRefresh}`
+      );
       return;
     }
     if (pendingSessionRefresh.ai_a || pendingSessionRefresh.ai_b) {
+      console.log(
+        `[Sessions] waiting for refresh ack pending=${JSON.stringify(
+          pendingSessionRefresh
+        )}`
+      );
       return;
     }
 
     pendingStart = false;
     waitingForSessionRefresh = false;
+    clearSessionRefreshWatchdog();
+    console.log("[Sessions] ready -> notifying client");
     sendToClient({ type: "sessions_ready" });
     sendPhaseContextToCandidate(phase);
     sendPhaseContextToInterviewer(phase);
@@ -7216,6 +8893,11 @@ ${salesText}${buildInterviewerNameBlock()}
   const emitPhaseUpdate = (nextPhase: Phase, reason: "start" | "trigger" | "manual") => {
     sendToClient({ type: "phase_update", phase: nextPhase, reason });
   };
+  const emitPracticeComplete = (completedPhase: Phase) => {
+    if (completedPracticePhases[completedPhase]) return;
+    completedPracticePhases[completedPhase] = true;
+    sendToClient({ type: "phase_practice_complete", phase: completedPhase });
+  };
   const emitHumanTurnReady = (reason: "phase_transition" | "manual_phase" | "server_ready") => {
     console.log(`[SalesFlow] human_turn_ready reason=${reason} phase=${phase}`);
     sendToClient({ type: "human_turn_ready", reason, phase });
@@ -7233,7 +8915,6 @@ ${salesText}${buildInterviewerNameBlock()}
     }
     phase = nextPhase;
     if (phase === "pattern1") {
-      pattern1Stage = "attendance";
       pattern3Section = "opening";
       pattern3FinalQuestionLoopActive = false;
       pattern3ExplicitMandatoryQuestionIds = {};
@@ -7280,8 +8961,7 @@ ${salesText}${buildInterviewerNameBlock()}
       lastSelectedCandidateQuestionId = null;
       lastCandidateRelayContext = null;
       clearBufferedCandidateTurnFallbacks();
-      candidateValidationRetryCount = 0;
-      followUpCountsByIntent = {};
+      candidateValidationRetriedForCurrentPrompt = false;
       followUpTopicUsage = {};
       companyGreetingPromptPending = false;
       companyIntroAckPromptPending = false;
@@ -7323,7 +9003,7 @@ ${salesText}${buildInterviewerNameBlock()}
       lastCandidateRelayContext = null;
       bufferedCandidateTurn = null;
       activeBufferedCandidateTurnId = null;
-      candidateValidationRetryCount = 0;
+      candidateValidationRetriedForCurrentPrompt = false;
       companyGreetingPromptPending = false;
       companyIntroAckPromptPending = false;
       studentIntroApprovalPromptPending = false;
@@ -7603,6 +9283,7 @@ When the sales rep clearly gives the final closing thanks, end politely with "�
       SALES_LED_FLOW &&
       scenarioMode === "unified" &&
       phase === "pattern2" &&
+      !pattern2ClosureApprovalRequest &&
       (pattern3StudentExitExecution ||
         (!pattern3ExitApprovalRequest && shouldTransitionToPattern3(normalized)))
     ) {
@@ -7837,12 +9518,11 @@ When the sales rep clearly gives the final closing thanks, end politely with "�
           instructions: candidateRelay.instructions,
           selectedQuestionId: selectedQuestionIdForSalesTurn
         };
-        candidateValidationRetryCount = 0;
+        candidateValidationRetriedForCurrentPrompt = false;
         if (phase === "pattern1") {
           console.log(
-            `[Pattern1Directive] stage=${pattern1Stage} mode=${candidateRelay.mode} text="${lastSalesUtterance}"`
+            `[Pattern1Directive] mode=${candidateRelay.mode} text="${lastSalesUtterance}"`
           );
-          advancePattern1Stage(candidateRelay.mode);
         }
         pushConversationText("ai_b", candidateRelay.text);
       }
@@ -7950,6 +9630,11 @@ When the sales rep clearly gives the final closing thanks, end politely with "�
         if (pendingSessionRefresh[key]) {
           pendingSessionRefresh[key] = false;
         }
+        console.log(
+          `[Sessions] onReady key=${key} pending=${JSON.stringify(
+            pendingSessionRefresh
+          )} waitingRefresh=${waitingForSessionRefresh}`
+        );
         maybeStartPendingSession();
       },
       onAudioDelta: (audioBase64) => {
@@ -8041,6 +9726,7 @@ When the sales rep clearly gives the final closing thanks, end politely with "�
         const responseMode = key === "ai_b" ? pendingCandidateResponseMode : null;
         const rawFinalText = transcript || transcriptBuffers[key];
         let finalText = rawFinalText;
+        let candidateDeclinedFurtherQuestionsThisTurn = false;
         if (key === "ai_b") {
           finalText = normalizeCandidateFinalText(finalText, responseMode);
           if (rawFinalText !== finalText) {
@@ -8132,12 +9818,12 @@ When the sales rep clearly gives the final closing thanks, end politely with "�
           console.log(
             `[CandidateValidate] verdict=${validation.verdict} confidence=${validation.confidence} mode=${responseMode ?? "unknown"} answer="${finalText}"${validation.reason ? ` reason="${validation.reason}"` : ""}`
           );
-          if (
+        if (
             validation.verdict === "retry" &&
             validation.confidence !== "low" &&
-            candidateValidationRetryCount < MAX_CANDIDATE_VALIDATION_RETRIES
+            !candidateValidationRetriedForCurrentPrompt
           ) {
-            candidateValidationRetryCount += 1;
+            candidateValidationRetriedForCurrentPrompt = true;
             clearBufferedCandidateTurnFallbacks();
             bufferedCandidateTurn = null;
             activeBufferedCandidateTurnId = null;
@@ -8262,6 +9948,8 @@ When the sales rep clearly gives the final closing thanks, end politely with "�
               !pendingCandidateRetry &&
               !askedCompanyQuestionKey &&
               /もうない|ありません|ないです|大丈夫です/u.test(normalizeText(finalText));
+            candidateDeclinedFurtherQuestionsThisTurn =
+              candidateDeclinedFurtherQuestions;
             const candidateAskedCompanyQuestion =
               !candidateDeclinedFurtherQuestions &&
               (responseMode === "good_question" ||
@@ -8357,9 +10045,37 @@ When the sales rep clearly gives the final closing thanks, end politely with "�
         }
         if (
           key === "ai_b" &&
+          phase === "pattern1" &&
+          (
+            responseMode === "goodbye" ||
+            (isPattern1PracticeClosingPrompt(lastSalesUtterance) &&
+              isAcknowledgementOnlyUtterance(finalText))
+          )
+        ) {
+          emitPracticeComplete("pattern1");
+        }
+        if (
+          key === "ai_b" &&
+          phase === "pattern2" &&
+          !candidateDeclinedFurtherQuestionsThisTurn &&
+          (
+            responseMode === "goodbye" ||
+            (isPattern2InterviewClosingUtterance(lastSalesUtterance) &&
+              isAcknowledgementOnlyUtterance(finalText))
+          )
+        ) {
+          emitPracticeComplete("pattern2");
+        }
+        if (
+          key === "ai_b" &&
           scenarioMode === "pattern2" &&
           phase === "pattern2" &&
-          responseMode === "goodbye"
+          !candidateDeclinedFurtherQuestionsThisTurn &&
+          (
+            responseMode === "goodbye" ||
+            (isPattern2InterviewClosingUtterance(lastSalesUtterance) &&
+              isAcknowledgementOnlyUtterance(finalText))
+          )
         ) {
           endSession("marker");
         }
@@ -8381,6 +10097,7 @@ When the sales rep clearly gives the final closing thanks, end politely with "�
         }
         if (endMarkers.some((marker) => finalText.includes(marker))) {
           if (phase === "pattern3") {
+            emitPracticeComplete("pattern3");
             endSession("marker");
           } else {
             console.log(
@@ -8426,7 +10143,7 @@ When the sales rep clearly gives the final closing thanks, end politely with "�
               }
             }
           }
-        } else if (totalTurns >= MAX_TURNS) {
+        } else if (!SALES_LED_FLOW && totalTurns >= MAX_TURNS) {
           endSession("max_turns");
         }
         if (
@@ -8565,6 +10282,7 @@ When the sales rep clearly gives the final closing thanks, end politely with "�
       onReady: () => {
         transcriptionSessionReady = true;
         pendingTranscriptionRefresh = false;
+        console.log("[Sessions] transcription ready");
         maybeStartPendingSession();
       },
       onAudioDelta: () => {},
@@ -8695,7 +10413,7 @@ When the sales rep clearly gives the final closing thanks, end politely with "�
           instructions: buildPhaseAwareDirective("self_intro", phase, false).instructions,
           selectedQuestionId: null
         };
-        candidateValidationRetryCount = 0;
+        candidateValidationRetriedForCurrentPrompt = false;
         const candidateName = getCurrentCandidateName();
         const scenario = getIndustryScenario(interviewIndustry);
         const selfIntroExamples = buildCandidateSelfIntroVariants();
@@ -8767,7 +10485,7 @@ When the sales rep clearly gives the final closing thanks, end politely with "�
       socket.send(
         JSON.stringify({
           type: "response.create",
-          response: { modalities: ["text", "audio"] }
+          response: { output_modalities: ["audio"] }
         })
       );
     }, delayMs);
@@ -8868,7 +10586,7 @@ When the sales rep clearly gives the final closing thanks, end politely with "�
       lastSelectedCandidateQuestionId = null;
       pendingCandidateCompanyQuestionRelay = false;
       lastCandidateRelayContext = null;
-      candidateValidationRetryCount = 0;
+      candidateValidationRetriedForCurrentPrompt = false;
       conversationHistory = [];
       scenarioMode = message.scenario ?? "unified";
       candidateLanguageLevel = message.candidateLevel ?? "basic";
@@ -8897,12 +10615,16 @@ When the sales rep clearly gives the final closing thanks, end politely with "�
       pendingCandidateRetryIntent = null;
       pendingInterviewerGuidance = null;
       pendingFollowUpContext = null;
-      followUpCountsByIntent = {};
       followUpTopicUsage = {};
       initializeSelectedInterviewerQuestions();
       pattern3FinalQuestionLoopActive = false;
       pattern3ExplicitMandatoryQuestionIds = {};
       pattern3ExplicitExtraQuestionIds = {};
+      completedPracticePhases = {
+        pattern1: false,
+        pattern2: false,
+        pattern3: false
+      };
       emitCandidateProfile();
       if (SALES_LED_FLOW) {
         if (scenarioMode === "pattern2") {
@@ -8921,7 +10643,6 @@ When the sales rep clearly gives the final closing thanks, end politely with "�
           introPhase = "complete";
         } else {
           introPhase = "sales_intro";
-          pattern1Stage = "attendance";
         }
         companyGreetingPromptPending = false;
         companyIntroAckPromptPending = false;
@@ -8969,6 +10690,7 @@ When the sales rep clearly gives the final closing thanks, end politely with "�
           ai_b: true
         };
         waitingForSessionRefresh = true;
+        console.log("[Sessions] requesting refresh before start");
         sendToClient({ type: "waiting_for_sessions" });
         setScriptHint(getPhaseScriptHint(phase));
         sendSessionUpdateToAi("ai_a");
@@ -8977,8 +10699,12 @@ When the sales rep clearly gives the final closing thanks, end politely with "�
           pendingTranscriptionRefresh = true;
           sendSessionUpdateToTranscription();
         }
+        scheduleSessionRefreshWatchdog("start");
       } else {
         pendingStart = true;
+        console.log(
+          `[Sessions] start queued until sockets are ready ai_a=${sessionReady.ai_a} ai_b=${sessionReady.ai_b}`
+        );
         sendToClient({ type: "waiting_for_sessions" });
         setScriptHint(getPhaseScriptHint(phase));
       }

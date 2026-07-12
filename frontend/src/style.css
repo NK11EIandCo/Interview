@@ -481,6 +481,168 @@ button:not(:disabled):hover {
   white-space: nowrap;
 }
 
+.evaluation-panel {
+  display: grid;
+  gap: 18px;
+}
+
+.evaluation-heading {
+  display: grid;
+  gap: 4px;
+}
+
+.evaluation-heading p {
+  margin: 0;
+  color: #1f1a17;
+  font-size: 14px;
+}
+
+.evaluation-score-pill {
+  font-family: var(--mono);
+  font-size: 13px;
+  padding: 8px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--panel-border);
+  background: rgba(255, 255, 255, 0.82);
+  white-space: nowrap;
+}
+
+.evaluation-overview {
+  display: grid;
+  gap: 6px;
+  padding: 16px 18px;
+  border-radius: 16px;
+  border: 1px solid var(--panel-border);
+  background: rgba(255, 255, 255, 0.74);
+}
+
+.evaluation-overview strong {
+  font-size: 18px;
+}
+
+.evaluation-overview p,
+.evaluation-summary,
+.evaluation-error {
+  margin: 0;
+  line-height: 1.6;
+  color: #1f1a17;
+}
+
+.evaluation-loading-card {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 18px 20px;
+  border-radius: 16px;
+  border: 1px solid var(--panel-border);
+  background: rgba(255, 255, 255, 0.78);
+}
+
+.evaluation-spinner {
+  width: 24px;
+  height: 24px;
+  border-radius: 999px;
+  border: 3px solid rgba(217, 129, 73, 0.18);
+  border-top-color: #d98149;
+  animation: evaluation-spin 0.9s linear infinite;
+  flex: 0 0 auto;
+}
+
+.evaluation-loading-copy {
+  display: grid;
+  gap: 4px;
+}
+
+.evaluation-loading-copy strong {
+  font-size: 16px;
+}
+
+.evaluation-error {
+  color: #9a2e2e;
+}
+
+@keyframes evaluation-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.evaluation-grid {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.evaluation-card {
+  display: grid;
+  gap: 8px;
+  padding: 16px 18px;
+  border-radius: 16px;
+  border: 1px solid var(--panel-border);
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.evaluation-card span {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: #3a312b;
+}
+
+.evaluation-card strong {
+  font-size: 20px;
+}
+
+.evaluation-card p {
+  margin: 0;
+  color: #1f1a17;
+  line-height: 1.55;
+}
+
+.evaluation-evidence-list {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 6px;
+  color: #1f1a17;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.evaluation-columns {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  align-items: start;
+}
+
+.evaluation-block {
+  display: grid;
+  gap: 10px;
+  align-content: start;
+  padding: 16px 18px;
+  border-radius: 16px;
+  border: 1px solid var(--panel-border);
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.evaluation-block-danger {
+  background: #fff6f3;
+  border-color: #f0c5ae;
+}
+
+.evaluation-block h3 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.evaluation-block ul {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 8px;
+  color: #1f1a17;
+}
+
 .phase-pill {
   font-family: var(--mono);
   font-size: 12px;
